@@ -25,7 +25,7 @@ class Economy(commands.Cog):
 
         if author_and_guild in users:
             embed = discord.Embed(
-                description=f"**Error:** You already have an active account on this server.",
+                description=f"**Error:** You already have an active account in this guild.",
                 color=discord.Color.red(),
             )
             await ctx.followup.send(embed=embed)
@@ -53,7 +53,7 @@ class Economy(commands.Cog):
 
         if author_and_guild not in users:
             embed = discord.Embed(
-                description=f"**Error:** You already do not have an active account on this server.",
+                description=f"**Error:** You already do not have an active account in this guild.",
                 color=discord.Color.red(),
             )
             await ctx.followup.send(embed=embed)
@@ -94,7 +94,7 @@ class Economy(commands.Cog):
         await ctx.followup.send(embed=embed, view=view)
 
     @commands.slash_command(description="Displays the user's current balance")
-    @option("user", description="The user whose account balance you wish to see", required=False)
+    @option(name="user", description="The user whose account balance you wish to see", required=False)
     async def balance(self, ctx, user: discord.User = None):
         await ctx.defer()
 
@@ -214,7 +214,7 @@ class Economy(commands.Cog):
             COOLDOWN[author_and_guild][1] = 0
 
     @commands.slash_command(description="Deposits the specified amount to the user's bank")
-    @option("deposit", description="The amount of credits you wish to deposit to your account", required=True)
+    @option(name="amount", description="The amount of credits you wish to deposit to your account", required=True)
     async def deposit(self, ctx, amount: int):
         await ctx.defer()
 
@@ -253,7 +253,7 @@ class Economy(commands.Cog):
         await ctx.followup.send(embed=embed)
 
     @commands.slash_command(description="Withdraws the specified amount from the user's bank")
-    @option("withdraw", description="The amount of credits you wish to withdraw from your account", required=True)
+    @option(name="amount", description="The amount of credits you wish to withdraw from your account", required=True)
     async def withdraw(self, ctx, amount: int):
         await ctx.defer()
 
@@ -292,7 +292,7 @@ class Economy(commands.Cog):
         await ctx.followup.send(embed=embed)
 
     @commands.slash_command(description="Rob another user for a chance to gain credits")
-    @option("user", description="The user you wish to rob from", required=True)
+    @option(name="user", description="The user you wish to rob from", required=True)
     async def rob(self, ctx, user: discord.User):
         await ctx.defer()
 
@@ -378,8 +378,9 @@ class Economy(commands.Cog):
         if COOLDOWN[author_and_guild][2] == 120:
             COOLDOWN[author_and_guild][2] = 0
 
-    @commands.slash_command(description="Displays the top 5 richest players on the server")
-    async def leaderboard(self, ctx):
+    @commands.slash_command(description="Displays the richest users in the guild")
+    @option(name="to", description="The end position of the leaderboard display", required=False)
+    async def leaderboard(self, ctx, to: int = None):
         await ctx.defer()
 
         leaderboard = {"IDs": [], "SortedUsers": [], "NameAndBalance": {}, "Values": [], "Joined": ""}
@@ -394,7 +395,7 @@ class Economy(commands.Cog):
         if len(leaderboard["IDs"]) == 0:
             embed = discord.Embed(
                 title="Official ShifuBot leaderboard",
-                description="No one has opened an account on this server.",
+                description="No one has opened an account in this guild.",
                 color=discord.Color.dark_gold(),
             )
             try:
@@ -403,10 +404,12 @@ class Economy(commands.Cog):
                 embed.set_author(name=ctx.guild.name)
             await ctx.followup.send(embed=embed)
             return
-        elif len(leaderboard["IDs"]) > 5:
-            end_point = 5
+        elif to:
+            end_point = min(max(to, 1), len(leaderboard["IDs"]) - 1)
+        elif len(leaderboard["IDs"]) > 10:
+            end_point = 10
         else:
-            end_point = len(leaderboard)
+            end_point = len(leaderboard["IDs"])
 
         for user in leaderboard["IDs"][:end_point + 1]:
             fetched_user = await self.bot.fetch_user(int(user.split("-")[0]))
@@ -417,10 +420,15 @@ class Economy(commands.Cog):
         for index, user in enumerate(leaderboard["SortedUsers"]):
             leaderboard["Values"].append(f"[**{index + 1}**] {user[0]} - {user[1]} ¤")
 
+            if len(leaderboard["Values"]) >= 3952:
+                break
+
         leaderboard["Joined"] = "\n".join(leaderboard["Values"])
+        additional_users = len(leaderboard["IDs"]) - len(leaderboard["Values"])
 
         embed = discord.Embed(
-            description=f"{leaderboard['Joined']}",
+            description=f"{leaderboard['Joined']}\n"
+                        f"{f'+ **{additional_users}** more...' if additional_users else ''}",
             color=discord.Color.dark_gold(),
         )
         try:

@@ -45,7 +45,7 @@ class Basic(commands.Cog):
         try:
             if type_ == "Text":
                 if engine == "gpt-3.5-turbo":
-                    output = openai.ChatCompletion.create(model=engine, messages=[{'role': 'user', 'content': prompt}],
+                    output = openai.ChatCompletion.create(model=engine, messages=[{"role": "user", "content": prompt}],
                                                           temperature=temperature, max_tokens=512)
                     text = output["choices"][0]["message"]["content"]
                 else:
@@ -74,6 +74,11 @@ class Basic(commands.Cog):
             print(e)
             embed = discord.Embed(
                 description=f"**Error:** Invalid request, please try again later.",
+                color=discord.Color.red(),
+            )
+        except openai.error.RateLimitError:
+            embed = discord.Embed(
+                description=f"**Error:** Quota exceeded.",
                 color=discord.Color.red(),
             )
         await main.edit(embed=embed)
@@ -241,12 +246,12 @@ class Basic(commands.Cog):
                 title="__ADMIN COMMANDS__",
                 description="**/msgdel [amount]** - Deletes the specified amount of messages in a channel\n"
                             "\* **amount** - The amount of messages to delete\n\n"
-                            "**/reset_economy** - Resets the economy of the server\n\n"
+                            "**/reset_economy** - Resets the economy of the guild\n\n"
                             "**/roleassign [roles] {message} {modify}** - Create a message for self-assigning roles\n"
                             "\* **roles** - The roles separated by semicolons (i.e. role1;role2;...)\n"
                             "\* **message** - The contents of the message\n"
                             "\* **modify** - The ID of the message to modify\n\n"
-                            "**/joinrole {role}** - Specify the role that new users of the server automatically get\n"
+                            "**/joinrole {role}** - Specify the role that new users of the guild automatically get\n"
                             "\* **role** - The name of the role",
                 color=discord.Color.dark_gold()
             )
@@ -273,7 +278,8 @@ class Basic(commands.Cog):
                             "**/beg** - Beg for a chance to gain credits\n\n"
                             "**/rob [user]** - Rob another user for a chance to gain credits\n"
                             "\* **user** - The user you wish to rob from\n\n"
-                            "**/leaderboard** - Displays the top 5 richest players on the server",
+                            "**/leaderboard {to}** - Displays the richest users in the guild"
+                            "\* **to** - The end position of the leaderboard display",
                 color=discord.Color.dark_gold()
             )
         else:
@@ -294,7 +300,7 @@ class Basic(commands.Cog):
             embed.set_author(name=f"{ctx.guild.name} - Helpdesk")
         await ctx.response.send_message(embed=embed)
 
-    @commands.slash_command(description="Information about the server, user and commands", pass_context=True)
+    @commands.slash_command(description="Information about the guild, user and commands", pass_context=True)
     @option(name="user", description="The user to get information of", required=False)
     async def information(self, ctx, user: discord.Member = None):
         first_part = ["Flesh", "Meat", "Bolt", "Metal", "Steel", "Worm", "Bone", "Nerve", "Tissue"]

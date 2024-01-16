@@ -51,32 +51,41 @@ class Admin(commands.Cog):
 
                 unselected_options = [option_.label for option_ in select.options if option_.value not in select.values]
 
-                assigned_roles, removed_roles = [], []
+                assigned_roles, removed_roles, unassigned_roles = [], [], []
                 for option_ in select.values:
                     role_ = discord.utils.get(ctx.guild.roles, name=option_)
 
                     if role_ not in member.roles:
-                        await member.add_roles(role_)
-                        assigned_roles.append(f"`{option_}`")
+                        try:
+                            await member.add_roles(role_)
+                            assigned_roles.append(f"`{option_}`")
+                        except discord.Forbidden:
+                            unassigned_roles.append(f"`{option_}`")
 
                 for option_ in unselected_options:
                     role_ = discord.utils.get(ctx.guild.roles, name=option_)
 
                     if role_ in member.roles:
-                        await member.remove_roles(role_)
-                        removed_roles.append(f"`{option_}`")
+                        try:
+                            await member.remove_roles(role_)
+                            removed_roles.append(f"`{option_}`")
+                        except discord.Forbidden:
+                            unassigned_roles.append(f"`{option_}`")
 
                 joined_assigned = "\n".join(assigned_roles) + "\n"
                 joined_removed = "\n".join(removed_roles)
+                joined_unassigned = "\n".join(unassigned_roles)
 
-                if assigned_roles or removed_roles:
+                if assigned_roles or removed_roles or unassigned_roles:
                     roles_assigned_message = "You have **assigned** the following roles to yourself:\n"
                     roles_removed_message = "You have **removed** the following roles from yourself:\n"
+                    roles_unassigned_message = "These roles could not be accessed due to permission issues:\n"
 
                     embed_ = discord.Embed(
                         description=f"{roles_assigned_message + joined_assigned if assigned_roles else ''}"
-                                    f"{roles_removed_message + joined_removed if removed_roles else ''}",
-                        color=discord.Color.dark_green()
+                                    f"{roles_removed_message + joined_removed if removed_roles else ''}"
+                                    f"{roles_unassigned_message + joined_unassigned if unassigned_roles else ''}",
+                        color=discord.Color.dark_green() if not unassigned_roles else discord.Color.red()
                     )
                 else:
                     embed_ = discord.Embed(
@@ -146,7 +155,7 @@ class Admin(commands.Cog):
             await ctx.send(embed=embed)
             return
 
-    @commands.slash_command(description="Specify the role that new users of the server automatically get")
+    @commands.slash_command(description="Specify the role that new users of the guild automatically get")
     @option(name="role", description="The name of the role", required=False)
     @commands.has_permissions(administrator=True)
     async def joinrole(self, ctx, role: str = None):
@@ -156,13 +165,13 @@ class Admin(commands.Cog):
         if not role:
             if str(ctx.guild.id) in roles:
                 embed = discord.Embed(
-                    description=f"The initial role of the server is currently: `{roles[str(ctx.guild.id)]}`",
+                    description=f"The initial role of the guild is currently: `{roles[str(ctx.guild.id)]}`",
                     color=discord.Color.dark_gold()
                 )
                 await ctx.respond(embed=embed, ephemeral=True)
             else:
                 embed = discord.Embed(
-                    description=f"No initial role has been set for the server yet.",
+                    description=f"No initial role has been set for the guild yet.",
                     color=discord.Color.dark_gold()
                 )
                 await ctx.respond(embed=embed, ephemeral=True)
@@ -197,7 +206,7 @@ class Admin(commands.Cog):
             json.dump(roles, role_file, indent=4)
 
         embed = discord.Embed(
-            description=f"Successfully changed the initial role of the server to: `{role}`",
+            description=f"Successfully changed the initial role of the guild to: `{role}`",
             color=discord.Color.dark_green()
         )
         await ctx.response.send_message(embed=embed, ephemeral=True)
@@ -213,7 +222,7 @@ class Admin(commands.Cog):
             return
 
     @commands.slash_command(description="Deletes a set amount of messages", pass_context=True)
-    @option("amount", description="The amount of messages to delete", required=True)
+    @option(name="amount", description="The amount of messages to delete", required=True)
     @commands.has_permissions(administrator=True)
     async def msgdel(self, ctx, amount: int):
         await ctx.defer()
@@ -240,7 +249,7 @@ class Admin(commands.Cog):
             await ctx.send(embed=embed)
             return
 
-    @commands.slash_command(description="Resets the economy of the server", pass_context=True)
+    @commands.slash_command(description="Resets the economy of the guild", pass_context=True)
     @commands.has_permissions(administrator=True)
     async def reset_economy(self, ctx):
         await ctx.defer()

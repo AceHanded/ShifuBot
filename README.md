@@ -7,7 +7,7 @@
 
 Multifunctional Discord bot implementation using Python, with emphasis on music commands.
 
-ShifuBot has been in development for a few years now, and has come a long way since the beginning. It is absolutely not perfect, although the current version seems to be fairly stable. I will keep updating the bot irregularly when I can think of improvements, and when I feel like it.
+ShifuBot has come a long way in the few years that it has been in development, and although still not perfect, the current release is "stable enough". I will keep updating the bot irregularly when I can think of improvements, when I have time and when I feel like it.
 
 **Note:** I will most likely not be releasing the bot itself for public use, at least not any time soon. However, I have included template files for the project, so you can run your own Discord bot using ShifuBot's code as a base. Simply remove the `.template` suffix from the `.env` file and add the values of the API keys / tokens to match your own, and you should be good to go.
 
@@ -15,6 +15,28 @@ ShifuBot has been in development for a few years now, and has come a long way si
 ## Changelog
 
 <details>
+    <summary>v1.0.1</summary>
+    
+    - Added a `loop` button to the `play` command's main embed, which cycles between the different loop-modes.
+
+      * Also added information to the main embed about the amount of times a single song has been looped.
+
+    - Added error messages.
+
+      * For the `play` command, when there are no search results found for the given query, as well as for a BrokenPipeError.
+
+      * For the `generate` command, when the OpenAI quota has been exceeded.
+
+    - Added parameter `to` to the `leaderboard` command, and increased default amount of shown users from 5 to 10.
+
+    - Reduced the amount of "message clutter" that the commands `blackjack` and `brawl` produce.
+
+    - The command `skip` now sets the loop-mode to `Disabled`, making it possible to actually skip songs that are being looped.
+    
+    - The command `play` now correctly removes the buttons from its main embed even after an hour has passed.
+</details>
+<details>
     <summary>v1.0.0</summary>
+    
     - Initial project release.
 </details>

@@ -69,7 +69,7 @@ class Music(commands.Cog):
             if len(channel.members) < 2 or all([member.bot for member in channel.members]):
                 await self.cleanup(member)
 
-                if member.guild.voice_client.is_connected():
+                if member.guild.voice_client and member.guild.voice_client.is_connected():
                     await member.guild.voice_client.disconnect()
 
                     embed = discord.Embed(
@@ -122,14 +122,7 @@ class Music(commands.Cog):
                     if ctx.voice_client and not ctx.voice_client.is_paused() and ctx.voice_client.is_playing() and \
                             PLAY_TIMER[ctx.guild.id]["Act"] != PLAYER_INFO[ctx.guild.id]["Object"].formatted_duration:
                         if PLAYER_MOD[ctx.guild.id]["Filter"]["Name"] == "Nightcore":
-                            if 1 <= PLAYER_MOD[ctx.guild.id]["Filter"]["Intensity"] < 10:
-                                PLAY_TIMER[ctx.guild.id]["Raw"] += \
-                                    float(f"1.0{PLAYER_MOD[ctx.guild.id]['Filter']['Intensity']}")
-                            elif 10 <= PLAYER_MOD[ctx.guild.id]["Filter"]["Intensity"] < 100:
-                                PLAY_TIMER[ctx.guild.id]["Raw"] += \
-                                    float(f"1.{PLAYER_MOD[ctx.guild.id]['Filter']['Intensity']}")
-                            else:
-                                PLAY_TIMER[ctx.guild.id]["Raw"] += 2
+                            PLAY_TIMER[ctx.guild.id]["Raw"] += 1 + PLAYER_MOD[ctx.guild.id]["Filter"]["Intensity"] / 100
                         else:
                             PLAY_TIMER[ctx.guild.id]["Raw"] += 1
 
@@ -151,6 +144,7 @@ class Music(commands.Cog):
             QUEUE[ctx.guild.id]["Current"].append(player.url)
         elif PLAYER_MOD[ctx.guild.id]["Loop"] == "Single":
             QUEUE[ctx.guild.id]["Current"].insert(1, player.url)
+            PLAYER_INFO[ctx.guild.id]["LoopCount"] += 1
         QUEUE[ctx.guild.id]["Current"].pop(0)
 
         if not PLAYER_INFO[ctx.guild.id]["Backed"] and (PLAYER_MOD[ctx.guild.id]["Loop"] != "Queue" and
@@ -177,6 +171,13 @@ class Music(commands.Cog):
             )
             await ctx.respond(embed=embed)
             return
+        except IndexError:
+            embed = discord.Embed(
+                description="**Error:** No search results for query.",
+                color=discord.Color.red()
+            )
+            await ctx.respond(embed=embed)
+            return
 
         return player
 
@@ -187,7 +188,10 @@ class Music(commands.Cog):
             self.duration_counter.cancel()
 
         try:
-            await PLAYER_INFO[ctx.guild.id]["EmbedMsg"].edit(view=None)
+            channel = self.bot.get_guild(int(ctx.guild.id)).get_channel(
+                PLAYER_INFO[ctx.guild.id]["TextChannel"])
+            message = await channel.fetch_message(PLAYER_INFO[ctx.guild.id]["EmbedID"])
+            await message.edit(view=None)
         except (discord.NotFound, discord.HTTPException, AttributeError, KeyError, UnboundLocalError):
             pass
 
@@ -238,6 +242,7 @@ class Music(commands.Cog):
         volumemid_button = Button(style=discord.ButtonStyle.secondary, emoji="<:volume_mid:1143514064023212174", row=1)
         volumeup_button = Button(style=discord.ButtonStyle.success, emoji="<:volume_up:1143513588623999087", row=1)
         volumemax_button = Button(style=discord.ButtonStyle.success, emoji="<:volume:1142886748200910959", row=1)
+        loop_button = Button(style=discord.ButtonStyle.secondary, emoji="<loopy:1196862829752500265>", row=2)
         back_button = Button(style=discord.ButtonStyle.secondary, label="Back",
                              emoji="<:goback:1142844613003067402>", row=2)
         pause_button = Button(style=discord.ButtonStyle.secondary, label="Pause",
@@ -245,7 +250,7 @@ class Music(commands.Cog):
         skip_button = Button(style=discord.ButtonStyle.secondary, label="Skip",
                              emoji="<:skip:1086405128787067001>", row=2)
         remove_button = Button(style=discord.ButtonStyle.danger, label="Remove →",
-                               emoji="<:ShifuR_trash:1086397311040626769>", row=2)
+                               emoji="<:ShifuR_trash:1086397311040626769>", row=3)
 
         async def pause_button_callback(interaction: discord.Interaction):
             PLAYER_INFO[ctx.guild.id]["ButtonInvoke"] = interaction.user.name
@@ -266,9 +271,9 @@ class Music(commands.Cog):
             await interaction.response.defer()
 
             if len(QUEUE[ctx.guild.id]["Current"]) - 1 < 1 and not QUEUE[ctx.guild.id]["Previous"]:
-                await interaction.followup.edit_message(message_id=PLAYER_INFO[ctx.guild.id]["EmbedMsg"].id, view=view)
+                await interaction.followup.edit_message(message_id=PLAYER_INFO[ctx.guild.id]["EmbedID"], view=view)
             elif len(QUEUE[ctx.guild.id]["Current"]) - 1 < 1 and QUEUE[ctx.guild.id]["Previous"]:
-                await interaction.followup.edit_message(message_id=PLAYER_INFO[ctx.guild.id]["EmbedMsg"].id, view=view3)
+                await interaction.followup.edit_message(message_id=PLAYER_INFO[ctx.guild.id]["EmbedID"], view=view3)
 
         async def back_button_callback(interaction: discord.Interaction):
             PLAYER_INFO[ctx.guild.id]["ButtonInvoke"] = interaction.user.name
@@ -306,11 +311,24 @@ class Music(commands.Cog):
             PLAYER_INFO[ctx.guild.id]["ButtonInvoke"] = None
             await interaction.response.defer()
 
+        async def loop_button_callback(interaction: discord.Interaction):
+            PLAYER_INFO[ctx.guild.id]["ButtonInvoke"] = interaction.user.name
+
+            if PLAYER_MOD[ctx.guild.id]["Loop"] == "Disabled":
+                await self.loop(ctx, mode="Single")
+            elif PLAYER_MOD[ctx.guild.id]["Loop"] == "Single":
+                await self.loop(ctx, mode="Queue")
+            else:
+                await self.loop(ctx, mode="Disabled")
+
+            PLAYER_INFO[ctx.guild.id]["ButtonInvoke"] = None
+            await interaction.response.defer()
+
         button_callbacks = {pause_button: pause_button_callback, skip_button: skip_button_callback,
                             remove_button: remove_button_callback, back_button: back_button_callback,
                             volumedown_button: volumedown_button_callback, volumeup_button: volumeup_button_callback,
                             volumemin_button: volumemin_button_callback, volumemid_button: volumemid_button_callback,
-                            volumemax_button: volumemax_button_callback}
+                            volumemax_button: volumemax_button_callback, loop_button: loop_button_callback}
 
         for button, callback in button_callbacks.items():
             button.callback = callback
@@ -628,6 +646,13 @@ class Music(commands.Cog):
                         video_url = f"https://www.youtube.com/watch?v={video_id}"
                 except (IndexError, googleapiclient.errors.HttpError):
                     video_url = modified_query
+                except BrokenPipeError:
+                    embed = discord.Embed(
+                        description="**Error:** Broken pipe. Please try again.",
+                        color=discord.Color.red()
+                    )
+                    await ctx.respond(embed=embed)
+                    return
 
                 player = await self.resolve_player_start(ctx, video_url, start_at)
 
@@ -658,15 +683,11 @@ class Music(commands.Cog):
         view4 = View(timeout=None)
 
         for view_ in [view, view2, view3, view4]:
-            if view_ == view3 or view_ == view4:
-                view_.add_item(back_button)
-
-            view_.add_item(pause_button), view_.add_item(skip_button), view_.add_item(volumemin_button), \
-                view_.add_item(volumedown_button), view_.add_item(volumemid_button), view_.add_item(volumeup_button), \
-                view_.add_item(volumemax_button)
-
-            if view_ == view2 or view_ == view4:
-                view_.add_item(remove_button)
+            view_.add_item(back_button) if view_ == view3 or view_ == view4 else None
+            view_.add_item(pause_button), view_.add_item(skip_button), view_.add_item(volumemin_button)
+            view_.add_item(volumedown_button), view_.add_item(volumemid_button), view_.add_item(volumeup_button)
+            view_.add_item(volumemax_button), view_.add_item(loop_button)
+            view_.add_item(remove_button) if view_ == view2 or view_ == view4 else None
 
         try:
             while QUEUE[ctx.guild.id]["Current"]:
@@ -690,7 +711,23 @@ class Music(commands.Cog):
                         PLAY_TIMER[ctx.guild.id]["Raw"], PLAY_TIMER[ctx.guild.id]["Act"] = 0, ""
 
                         try:
-                            await PLAYER_INFO[ctx.guild.id]["EmbedMsg"].edit(view=None)
+                            if PLAYER_INFO[ctx.guild.id]["EmbedID"]:
+                                channel = self.bot.get_guild(int(ctx.guild.id)).get_channel(
+                                    PLAYER_INFO[ctx.guild.id]["TextChannel"])
+                                message = await channel.fetch_message(PLAYER_INFO[ctx.guild.id]["EmbedID"])
+
+                                if PLAYER_MOD[ctx.guild.id]["Loop"] != "Single":
+                                    await message.edit(view=None)
+                                    PLAYER_INFO[ctx.guild.id]["LoopCount"] = 0
+                                else:
+                                    embed = discord.Embed(
+                                        description=f"{PLAYER_INFO[ctx.guild.id]['Embed'].description}\n\n"
+                                                    f"**Looped:** **{PLAYER_INFO[ctx.guild.id]['LoopCount']}** time(s)",
+                                        color=discord.Color.dark_green()
+                                    )
+                                    embed.set_footer(text=PLAYER_INFO[ctx.guild.id]["Embed"].footer.text,
+                                                     icon_url=PLAYER_INFO[ctx.guild.id]["Embed"].footer.icon_url)
+                                    await message.edit(embed=embed)
                         except (discord.NotFound, discord.HTTPException, AttributeError, KeyError, UnboundLocalError):
                             pass
 
@@ -713,6 +750,13 @@ class Music(commands.Cog):
                             uploader_picture_url = response["items"][0]["snippet"]["thumbnails"]["high"]["url"]
                         except (IndexError, googleapiclient.errors.HttpError):
                             uploader_picture_url = None
+                        except BrokenPipeError:
+                            embed = discord.Embed(
+                                description="**Error:** Broken pipe. Please try again.",
+                                color=discord.Color.red()
+                            )
+                            await ctx.respond(embed=embed)
+                            continue
 
                         PLAY_TIMER[ctx.guild.id]["Old"] = player.start_at_seconds
                         player.volume = PLAYER_MOD[ctx.guild.id]["Volume"]
@@ -757,21 +801,22 @@ class Music(commands.Cog):
                                     color=discord.Color.dark_green(),
                                 )
                                 embed.set_footer(text=player.uploader, icon_url=uploader_picture_url)
+                                PLAYER_INFO[ctx.guild.id]["Embed"] = embed
 
                                 if not len(QUEUE[ctx.guild.id]["Previous"]):
                                     if not PLAYER_INFO[ctx.guild.id]["First"]:
-                                        PLAYER_INFO[ctx.guild.id]["EmbedMsg"] = await ctx.send(embed=embed,
-                                                                                               view=view2)
+                                        embed_message = await ctx.send(embed=embed, view=view2)
+                                        PLAYER_INFO[ctx.guild.id]["EmbedID"] = embed_message.id
                                     else:
-                                        PLAYER_INFO[ctx.guild.id]["EmbedMsg"] = await ctx.respond(embed=embed,
-                                                                                                  view=view2)
+                                        embed_message = await ctx.respond(embed=embed, view=view2)
+                                        PLAYER_INFO[ctx.guild.id]["EmbedID"] = embed_message.id
                                 else:
                                     if not PLAYER_INFO[ctx.guild.id]["First"]:
-                                        PLAYER_INFO[ctx.guild.id]["EmbedMsg"] = await ctx.send(embed=embed,
-                                                                                               view=view4)
+                                        embed_message = await ctx.send(embed=embed, view=view4)
+                                        PLAYER_INFO[ctx.guild.id]["EmbedID"] = embed_message.id
                                     else:
-                                        PLAYER_INFO[ctx.guild.id]["EmbedMsg"] = await ctx.respond(embed=embed,
-                                                                                                  view=view4)
+                                        embed_message = await ctx.respond(embed=embed, view=view4)
+                                        PLAYER_INFO[ctx.guild.id]["EmbedID"] = embed_message.id
                             elif not (PLAYER_MOD[ctx.guild.id]["Loop"] == "Queue" or
                                       PLAYER_MOD[ctx.guild.id]["Loop"] == "Single"):
                                 embed = discord.Embed(
@@ -786,21 +831,22 @@ class Music(commands.Cog):
                                     color=discord.Color.dark_green(),
                                 )
                                 embed.set_footer(text=player.uploader, icon_url=uploader_picture_url)
+                                PLAYER_INFO[ctx.guild.id]["Embed"] = embed
 
                                 if not len(QUEUE[ctx.guild.id]["Previous"]):
                                     if not PLAYER_INFO[ctx.guild.id]["First"]:
-                                        PLAYER_INFO[ctx.guild.id]["EmbedMsg"] = await ctx.send(embed=embed,
-                                                                                               view=view2)
+                                        embed_message = await ctx.send(embed=embed, view=view2)
+                                        PLAYER_INFO[ctx.guild.id]["EmbedID"] = embed_message.id
                                     else:
-                                        PLAYER_INFO[ctx.guild.id]["EmbedMsg"] = await ctx.respond(embed=embed,
-                                                                                                  view=view2)
+                                        embed_message = await ctx.respond(embed=embed, view=view2)
+                                        PLAYER_INFO[ctx.guild.id]["EmbedID"] = embed_message.id
                                 else:
                                     if not PLAYER_INFO[ctx.guild.id]["First"]:
-                                        PLAYER_INFO[ctx.guild.id]["EmbedMsg"] = await ctx.send(embed=embed,
-                                                                                               view=view4)
+                                        embed_message = await ctx.send(embed=embed, view=view4)
+                                        PLAYER_INFO[ctx.guild.id]["EmbedID"] = embed_message.id
                                     else:
-                                        PLAYER_INFO[ctx.guild.id]["EmbedMsg"] = await ctx.respond(embed=embed,
-                                                                                                  view=view4)
+                                        embed_message = await ctx.respond(embed=embed, view=view4)
+                                        PLAYER_INFO[ctx.guild.id]["EmbedID"] = embed_message.id
                         else:
                             if PLAYER_INFO[ctx.guild.id]["First"] and (PLAYER_MOD[ctx.guild.id]["Loop"] == "Queue" or
                                                                        PLAYER_MOD[ctx.guild.id]["Loop"] == "Single"):
@@ -814,11 +860,14 @@ class Music(commands.Cog):
                                     color=discord.Color.dark_green(),
                                 )
                                 embed.set_footer(text=player.uploader, icon_url=uploader_picture_url)
+                                PLAYER_INFO[ctx.guild.id]["Embed"] = embed
 
                                 if not len(QUEUE[ctx.guild.id]["Previous"]):
-                                    PLAYER_INFO[ctx.guild.id]["EmbedMsg"] = await ctx.respond(embed=embed, view=view)
+                                    embed_message = await ctx.respond(embed=embed, view=view)
+                                    PLAYER_INFO[ctx.guild.id]["EmbedID"] = embed_message.id
                                 else:
-                                    PLAYER_INFO[ctx.guild.id]["EmbedMsg"] = await ctx.respond(embed=embed, view=view3)
+                                    embed_message = await ctx.respond(embed=embed, view=view3)
+                                    PLAYER_INFO[ctx.guild.id]["EmbedID"] = embed_message.id
                             elif not (PLAYER_MOD[ctx.guild.id]["Loop"] == "Queue" or
                                       PLAYER_MOD[ctx.guild.id]["Loop"] == "Single"):
                                 embed = discord.Embed(
@@ -831,42 +880,45 @@ class Music(commands.Cog):
                                     color=discord.Color.dark_green(),
                                 )
                                 embed.set_footer(text=player.uploader, icon_url=uploader_picture_url)
+                                PLAYER_INFO[ctx.guild.id]["Embed"] = embed
 
                                 if not len(QUEUE[ctx.guild.id]["Previous"]):
                                     if not PLAYER_INFO[ctx.guild.id]["First"]:
-                                        PLAYER_INFO[ctx.guild.id]["EmbedMsg"] = await ctx.send(embed=embed,
-                                                                                               view=view)
+                                        embed_message = await ctx.send(embed=embed, view=view)
+                                        PLAYER_INFO[ctx.guild.id]["EmbedID"] = embed_message.id
                                     else:
-                                        PLAYER_INFO[ctx.guild.id]["EmbedMsg"] = await ctx.respond(embed=embed,
-                                                                                                  view=view)
+                                        embed_message = await ctx.respond(embed=embed, view=view)
+                                        PLAYER_INFO[ctx.guild.id]["EmbedID"] = embed_message.id
                                 else:
                                     if not PLAYER_INFO[ctx.guild.id]["First"]:
-                                        PLAYER_INFO[ctx.guild.id]["EmbedMsg"] = await ctx.send(embed=embed,
-                                                                                               view=view3)
+                                        embed_message = await ctx.send(embed=embed, view=view3)
+                                        PLAYER_INFO[ctx.guild.id]["EmbedID"] = embed_message.id
                                     else:
-                                        PLAYER_INFO[ctx.guild.id]["EmbedMsg"] = await ctx.respond(embed=embed,
-                                                                                                  view=view3)
+                                        embed_message = await ctx.respond(embed=embed, view=view3)
+                                        PLAYER_INFO[ctx.guild.id]["EmbedID"] = embed_message.id
 
-                        PLAYER_INFO[ctx.guild.id]["PauseMsg"] = None
-                        PLAYER_INFO[ctx.guild.id]["VolMsg"] = None
-                        PLAYER_INFO[ctx.guild.id]["RmvMsg"] = None
-                        PLAYER_INFO[ctx.guild.id]["Removed"].clear()
-                        PLAYER_INFO[ctx.guild.id]["First"] = False
+                        if PLAYER_MOD[ctx.guild.id]["Loop"] != "Single":
+                            PLAYER_INFO[ctx.guild.id]["PauseMsg"] = None
+                            PLAYER_INFO[ctx.guild.id]["VolMsg"] = None
+                            PLAYER_INFO[ctx.guild.id]["RmvMsg"] = None
+                            PLAYER_INFO[ctx.guild.id]["LoopMsg"] = None
+                            PLAYER_INFO[ctx.guild.id]["Removed"].clear()
+                            PLAYER_INFO[ctx.guild.id]["First"] = False
                     continue
 
                 except Exception as exc:
-                    if type(exc).__name__ == "KeyError":
+                    if isinstance(exc, KeyError):
                         continue
-                    elif type(exc).__name__ == "DownloadError":
-                        QUEUE[ctx.guild.id]["Current"].pop(0)
-                    print(f"In upper exception: {exc} [{type(exc).__name__}]")
-
-                    try:
-                        if ctx.voice_client and ctx.voice_client.is_connected():
-                            continue
-                    except (AttributeError, ConnectionResetError):
+                    if isinstance(exc, (AttributeError, ConnectionResetError)):
                         await self.cleanup(ctx)
-                        continue
+                    elif isinstance(exc, yt_dlp.DownloadError):
+                        embed = discord.Embed(
+                            description=f"**Error:** Failed to stream query `{QUEUE[ctx.guild.id]['Current'].pop(0)}`.",
+                            color=discord.Color.red()
+                        )
+                        await ctx.send(embed=embed)
+
+                    print(f"In upper exception: {exc} [{type(exc).__name__}]")
         except KeyError:
             pass
 
@@ -1200,32 +1252,21 @@ class Music(commands.Cog):
             await ctx.edit(embed=embed)
 
             additional_songs = len(QUEUE[ctx.guild.id]["Current"]) - (len(positional_queue["List"]) + 1)
+            additional_song_message = f"+ {additional_songs} more...\n"
             total_duration = None
 
             if all(isinstance(song, YTDLSource) for song in QUEUE[ctx.guild.id]["Current"][1:]):
                 total_duration = format_duration(sum(song.duration if song.duration else 0
                                                      for song in QUEUE[ctx.guild.id]["Current"][1:]))
 
-            if additional_songs > 0:
-                embed = discord.Embed(
-                    description=f"**In queue:**\n"
-                                f"{positional_queue['Formatted']}\n"
-                                f"+ **{additional_songs}** more...\n\n"
-                                f"**In total:** **{len(QUEUE[ctx.guild.id]['Current']) - 1}** songs"
-                                f"{' [**' if total_duration else ''}{total_duration if total_duration else ''}"
-                                f"{'**]' if total_duration else ''}",
-                    color=discord.Color.dark_gold(),
-                )
-            else:
-                embed = discord.Embed(
-                    description=f"**In queue:**\n"
-                                f"{positional_queue['Formatted']}\n\n"
-                                f"**In total:** **{len(QUEUE[ctx.guild.id]['Current']) - 1}** songs"
-                                f"{' [**' if total_duration else ''}{total_duration if total_duration else ''}"
-                                f"{'**]' if total_duration else ''}",
-                    color=discord.Color.dark_gold(),
-                )
-
+            embed = discord.Embed(
+                description=f"**In queue:**\n"
+                            f"{positional_queue['Formatted']}\n"
+                            f"{additional_song_message if additional_songs else ''}\n"
+                            f"**In total:** **{len(QUEUE[ctx.guild.id]['Current']) - 1}** song(s)"
+                            f"{f' [**{total_duration}**]' if total_duration else ''}",
+                color=discord.Color.dark_gold(),
+            )
             if ctx.voice_client and PLAY_TIMER[ctx.guild.id]["Act"] != "":
                 embed.set_footer(text=f"⮚ Now playing: {PLAYER_INFO[ctx.guild.id]['Title']} "
                                       f"[{PLAY_TIMER[ctx.guild.id]['Act']} | "
@@ -1355,6 +1396,7 @@ class Music(commands.Cog):
                 await ctx.respond(embed=embed)
             return
 
+        PLAYER_MOD[ctx.guild.id]["Loop"] = "Disabled"
         to = min(max(to, 1), len(QUEUE[ctx.guild.id]["Current"]) - 1)
 
         if to <= 1 or len(QUEUE[ctx.guild.id]["Current"]) - 1 < 1:
@@ -1446,7 +1488,10 @@ class Music(commands.Cog):
     @option(name="mode", description="The loop mode you wish to use", choices=["Single", "Queue", "Disabled"],
             required=False)
     async def loop(self, ctx, mode: str = None):
-        await ctx.defer()
+        try:
+            await ctx.defer()
+        except (discord.ApplicationCommandInvokeError, discord.InteractionResponded):
+            pass
 
         if not mode:
             embed = discord.Embed(
@@ -1462,7 +1507,14 @@ class Music(commands.Cog):
             description=f"**⟳ Loop mode is now:** {PLAYER_MOD[ctx.guild.id]['Loop']}",
             color=discord.Color.blurple(),
         )
-        await ctx.respond(embed=embed)
+        if PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]:
+            embed.set_footer(text=f"Requested via a button [{PLAYER_INFO[ctx.guild.id]['ButtonInvoke']}]")
+            if PLAYER_INFO[ctx.guild.id]["LoopMsg"]:
+                await PLAYER_INFO[ctx.guild.id]["LoopMsg"].edit(embed=embed)
+            else:
+                PLAYER_INFO[ctx.guild.id]["LoopMsg"] = await ctx.send(embed=embed)
+        else:
+            await ctx.respond(embed=embed)
 
     @commands.slash_command(description="Toggles pause for the current song")
     async def pause(self, ctx):
@@ -1908,9 +1960,10 @@ class Music(commands.Cog):
                                         "Volume": 0.50}
         if ctx.guild.id not in PLAYER_INFO:
             PLAYER_INFO[ctx.guild.id] = {"Title": "", "URL": "", "Duration": "", "DurationSec": 0, "Object": None,
-                                         "EmbedMsg": None, "ListSec": 0, "ListDuration": "",
-                                         "Backed": False, "PauseMsg": None, "VolMsg": None, "RmvMsg": None,
-                                         "Removed": [], "TextChannel": 0, "First": False, "ButtonInvoke": None}
+                                         "EmbedID": 0, "ListSec": 0, "ListDuration": "", "Backed": False,
+                                         "PauseMsg": None, "VolMsg": None, "RmvMsg": None, "LoopMsg": None,
+                                         "Removed": [], "TextChannel": 0, "First": False, "ButtonInvoke": None,
+                                         "LoopCount": 0, "Embed": None}
         if ctx.guild.id not in PLAY_TIMER:
             PLAY_TIMER[ctx.guild.id] = {"Raw": 0, "Act": "", "Old": 0}
         if ctx.guild.id not in INVOKED:

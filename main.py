@@ -12,6 +12,8 @@ from Cogs.utils import Color
 
 load_dotenv()
 
+SELECT = {}
+
 bot = commands.Bot(command_prefix="€", case_insensitive=True, help_command=None)
 
 cogs = ["music", "basic", "admin", "game", "economy"]
@@ -25,7 +27,7 @@ for cog in cogs:
 async def load(ctx, extension: str):
     await ctx.defer()
 
-    bot.load_extension(f'Cogs.{extension}')
+    bot.load_extension(f"Cogs.{extension}")
 
     embed = discord.Embed(
         description=f"Cog `{extension}` loaded successfully.",
@@ -40,7 +42,7 @@ async def load(ctx, extension: str):
 async def unload(ctx, extension: str):
     await ctx.defer()
 
-    bot.unload_extension(f'Cogs.{extension}')
+    bot.unload_extension(f"Cogs.{extension}")
 
     embed = discord.Embed(
         description=f"Cog `{extension}` unloaded successfully.",
@@ -55,7 +57,7 @@ async def unload(ctx, extension: str):
 async def reload(ctx, extension: str):
     await ctx.defer()
 
-    bot.reload_extension(f'Cogs.{extension}')
+    bot.reload_extension(f"Cogs.{extension}")
 
     embed = discord.Embed(
         description=f"Cog `{extension}` reloaded successfully.",
@@ -87,19 +89,17 @@ async def on_member_join(member):
                   f"{Color.MAGENTA}{roles[member.guild.id].name}{Color.END}")
         except (AttributeError, discord.Forbidden) as e:
             print(e)
-            pass
 
 
 @bot.event
 async def on_ready():
-    print(f"Kirjautunut sisään: {bot.user} (ID: {bot.user.id})")
-    print('------')
+    print(f"{bot.user} ({bot.user.id}) initialized!\n-----")
     print("Initializing role menus...")
 
     with open("Data/messages.json", "r") as message_file:
         messages = json.load(message_file)
 
-    invalid_message_guilds = []
+    valid_message_guilds, invalid_message_guilds = [], []
     for guild_id in messages:
         try:
             select = Select(placeholder="Waiting for role selection...", options=[], min_values=0)
@@ -109,35 +109,44 @@ async def on_ready():
                 async def role_callback(interaction: discord.Interaction):
                     member = bot.get_guild(interaction.guild_id).get_member(interaction.user.id)
 
-                    unselected_options = [option_.label for option_ in select.options if option_.value not in
-                                          select.values]
+                    unselected_options = [option_.label for option_ in SELECT[str(interaction.guild.id)].options if
+                                          option_.value not in SELECT[str(interaction.guild.id)].values]
 
-                    assigned_roles, removed_roles = [], []
-                    for option_ in select.values:
+                    assigned_roles, removed_roles, unassigned_roles = [], [], []
+                    for option_ in SELECT[str(interaction.guild.id)].values:
                         role_ = discord.utils.get(interaction.guild.roles, name=option_)
 
                         if role_ not in member.roles:
-                            await member.add_roles(role_)
-                            assigned_roles.append(f"`{option_}`")
+                            try:
+                                await member.add_roles(role_)
+                                assigned_roles.append(f"`{option_}`")
+                            except discord.Forbidden:
+                                unassigned_roles.append(f"`{option_}`")
 
                     for option_ in unselected_options:
                         role_ = discord.utils.get(interaction.guild.roles, name=option_)
 
                         if role_ in member.roles:
-                            await member.remove_roles(role_)
-                            removed_roles.append(f"`{option_}`")
+                            try:
+                                await member.remove_roles(role_)
+                                removed_roles.append(f"`{option_}`")
+                            except discord.Forbidden:
+                                unassigned_roles.append(f"`{option_}`")
 
                     joined_assigned = "\n".join(assigned_roles) + "\n"
                     joined_removed = "\n".join(removed_roles)
+                    joined_unassigned = "\n".join(unassigned_roles)
 
-                    if assigned_roles or removed_roles:
+                    if assigned_roles or removed_roles or unassigned_roles:
                         roles_assigned_message = "You have **assigned** the following roles to yourself:\n"
                         roles_removed_message = "You have **removed** the following roles from yourself:\n"
+                        roles_unassigned_message = "These roles could not be accessed due to permission issues:\n"
 
                         embed_ = discord.Embed(
                             description=f"{roles_assigned_message + joined_assigned if assigned_roles else ''}"
-                                        f"{roles_removed_message + joined_removed if removed_roles else ''}",
-                            color=discord.Color.dark_green()
+                                        f"{roles_removed_message + joined_removed if removed_roles else ''}"
+                                        f"{roles_unassigned_message + joined_unassigned if unassigned_roles else ''}",
+                            color=discord.Color.dark_green() if not unassigned_roles else discord.Color.red()
                         )
                     else:
                         embed_ = discord.Embed(
@@ -161,6 +170,9 @@ async def on_ready():
             channel = bot.get_guild(int(guild_id)).get_channel(messages[guild_id]["ChannelID"])
             message = await channel.fetch_message(messages[guild_id]["MessageID"])
             await message.edit(view=view)
+
+            SELECT[guild_id] = select
+            valid_message_guilds.append(guild_id)
         except discord.NotFound:
             invalid_message_guilds.append(guild_id)
             continue
@@ -171,8 +183,9 @@ async def on_ready():
     with open("Data/messages.json", "w") as message_file:
         json.dump(messages, message_file, indent=4)
 
-    print(f"Role menus initialized! "
-          f"{f'({Color.RED}{len(invalid_message_guilds)} removals{Color.END})' if invalid_message_guilds else ''}")
+    print(f"Role menus initialized!"
+          f"{f' ({Color.GREEN}{len(valid_message_guilds)} updates{Color.END})' if valid_message_guilds else ''}"
+          f"{f' ({Color.RED}{len(invalid_message_guilds)} removals{Color.END})' if invalid_message_guilds else ''}")
 
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="tracks | /help"))
     resource_display.start()
