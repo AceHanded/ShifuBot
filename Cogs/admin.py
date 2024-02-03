@@ -5,6 +5,8 @@ from discord.ext.commands import CheckFailure
 from discord.ui import Button, Select, View
 import asyncio
 import json
+import os
+from Cogs.utils import get_language_strings
 
 
 class Admin(commands.Cog):
@@ -19,6 +21,8 @@ class Admin(commands.Cog):
     async def roleassign(self, ctx, roles: str, message: str = "Role assignment time.", modify: str = None):
         await ctx.defer()
 
+        strings = await get_language_strings(ctx)
+
         role_dict = {"Options": [], "Errors": {"NotFound": [], "Higher": [], "NoAccess": []}}
         split_roles = roles.split(";")
 
@@ -26,12 +30,12 @@ class Admin(commands.Cog):
             messages = json.load(message_file)
 
         embed = discord.Embed(
-            description=f"Initializing **{len(split_roles)}** roles...",
+            description=strings["RoleAssign.Initializing"].format(len(split_roles)),
             color=discord.Color.dark_green()
         )
         initial = await ctx.followup.send(embed=embed)
 
-        select = Select(placeholder="Waiting for role selection...", options=[], min_values=0)
+        select = Select(placeholder=strings["RoleSelection.Placeholder"], options=[], min_values=0)
 
         running_number = 1
         for role in split_roles:
@@ -77,9 +81,9 @@ class Admin(commands.Cog):
                 joined_unassigned = "\n".join(unassigned_roles)
 
                 if assigned_roles or removed_roles or unassigned_roles:
-                    roles_assigned_message = "You have **assigned** the following roles to yourself:\n"
-                    roles_removed_message = "You have **removed** the following roles from yourself:\n"
-                    roles_unassigned_message = "These roles could not be accessed due to permission issues:\n"
+                    roles_assigned_message = strings["RoleSelection.Assigned"]
+                    roles_removed_message = strings["RoleSelection.Removed"]
+                    roles_unassigned_message = strings["RoleSelection.Unassigned"]
 
                     embed_ = discord.Embed(
                         description=f"{roles_assigned_message + joined_assigned if assigned_roles else ''}"
@@ -89,7 +93,7 @@ class Admin(commands.Cog):
                     )
                 else:
                     embed_ = discord.Embed(
-                        description=f"No changes made to roles.",
+                        description=strings["RoleSelection.NoChanges"],
                         color=discord.Color.dark_green()
                     )
                 await interaction.response.send_message(embed=embed_, ephemeral=True)
@@ -123,7 +127,7 @@ class Admin(commands.Cog):
                 messages[ctx.guild.id] = {
                     "MessageID": int(message_.id),
                     "ChannelID": int(ctx.channel.id),
-                    "Opts": role_dict['Options']
+                    "Opts": role_dict["Options"]
                 }
                 with open("Data/messages.json", "w") as message_file:
                     json.dump(messages, message_file, indent=4)
@@ -133,9 +137,9 @@ class Admin(commands.Cog):
             joined_higher = "\n".join(role_dict["Errors"]["Higher"]) + "\n"
             joined_no_access = "\n".join(role_dict["Errors"]["NoAccess"])
 
-            roles_not_found_error = "**Error:** These roles were not found:\n"
-            roles_higher_error = "**Error:** These roles were higher in the hierarchy:\n"
-            roles_no_access_error = "**Error:** These roles could not be accessed due to permission issues:\n"
+            roles_not_found_error = strings["Errors.RoleSelectionNotFound"]
+            roles_higher_error = strings["Errors.RoleSelectionHigher"]
+            roles_no_access_error = strings["Errors.RoleSelectionNoAccess"]
 
             embed = discord.Embed(
                 description=f"{(roles_not_found_error + joined_not_found) if role_dict['Errors']['NotFound'] else ''}"
@@ -145,33 +149,25 @@ class Admin(commands.Cog):
             )
             await ctx.respond(embed=embed, ephemeral=True)
 
-    @roleassign.error
-    async def roleassign_error(self, ctx, error):
-        if isinstance(error, CheckFailure):
-            embed = discord.Embed(
-                description="**Error:** Apologies, only admins are able to execute a command this powerful.",
-                color=discord.Color.red(),
-            )
-            await ctx.send(embed=embed)
-            return
-
     @commands.slash_command(description="Specify the role that new users of the guild automatically get")
     @option(name="role", description="The name of the role", required=False)
     @commands.has_permissions(administrator=True)
     async def joinrole(self, ctx, role: str = None):
+        strings = await get_language_strings(ctx)
+
         with open("Data/joinroles.json", "r") as role_file:
             roles = json.load(role_file)
 
         if not role:
             if str(ctx.guild.id) in roles:
                 embed = discord.Embed(
-                    description=f"The initial role of the guild is currently: `{roles[str(ctx.guild.id)]}`",
+                    description=strings["Admin.JoinRole"].format(roles[str(ctx.guild.id)]),
                     color=discord.Color.dark_gold()
                 )
                 await ctx.respond(embed=embed, ephemeral=True)
             else:
                 embed = discord.Embed(
-                    description=f"No initial role has been set for the guild yet.",
+                    description=strings["Admin.JoinRoleNone"],
                     color=discord.Color.dark_gold()
                 )
                 await ctx.respond(embed=embed, ephemeral=True)
@@ -179,7 +175,7 @@ class Admin(commands.Cog):
 
         if discord.utils.get(ctx.guild.roles, name=role) is None:
             embed = discord.Embed(
-                description=f"**Error:** Could not find the role: `{role}`",
+                description=strings["Errors.JoinRoleNotFound"].format(role),
                 color=discord.Color.red()
             )
             await ctx.respond(embed=embed, ephemeral=True)
@@ -187,14 +183,14 @@ class Admin(commands.Cog):
         elif discord.utils.get(ctx.guild.roles, name=role) >= \
                 discord.utils.get(ctx.guild.roles, name=ctx.guild.me.top_role.name):
             embed = discord.Embed(
-                description=f"**Error:** This role is higher in the hierarchy than mine: `{role}`",
+                description=strings["Errors.JoinRoleHigher"].format(role),
                 color=discord.Color.red()
             )
             await ctx.respond(embed=embed, ephemeral=True)
             return
         elif not discord.utils.get(ctx.guild.roles, name=role).is_assignable():
             embed = discord.Embed(
-                description=f"**Error:** I cannot access this role due to permission issues: `{role}`",
+                description=strings["Errors.JoinRoleNoAccess"].format(role),
                 color=discord.Color.red()
             )
             await ctx.respond(embed=embed, ephemeral=True)
@@ -206,53 +202,37 @@ class Admin(commands.Cog):
             json.dump(roles, role_file, indent=4)
 
         embed = discord.Embed(
-            description=f"Successfully changed the initial role of the guild to: `{role}`",
+            description=strings["Admin.JoinRoleSuccess"].format(role),
             color=discord.Color.dark_green()
         )
         await ctx.response.send_message(embed=embed, ephemeral=True)
 
-    @joinrole.error
-    async def joinrole_error(self, ctx, error):
-        if isinstance(error, CheckFailure):
-            embed = discord.Embed(
-                description="**Error:** Apologies, only admins are able to execute a command this powerful.",
-                color=discord.Color.red(),
-            )
-            await ctx.send(embed=embed)
-            return
-
-    @commands.slash_command(description="Deletes a set amount of messages", pass_context=True)
+    @commands.slash_command(description="Deletes a set amount of messages")
     @option(name="amount", description="The amount of messages to delete", required=True)
     @commands.has_permissions(administrator=True)
     async def msgdel(self, ctx, amount: int):
         await ctx.defer()
 
+        strings = await get_language_strings(ctx)
+
         amount = min(max(amount, 0), 100)
 
         embed = discord.Embed(
-            description=f"Deleting **{amount}** message(s), please wait a few seconds...",
+            description=strings["Admin.MessageDel"].format(amount),
             color=discord.Color.dark_red()
         )
-        embed.set_footer(text="Note: If you wish to cancel, delete this message.")
+        embed.set_footer(text=strings["Admin.DeleteToCancel"])
         failsafe = await ctx.followup.send(embed=embed)
         await asyncio.sleep(10)
         await failsafe.delete()
         await ctx.channel.purge(limit=amount)
 
-    @msgdel.error
-    async def msgdel_error(self, ctx, error):
-        if isinstance(error, CheckFailure):
-            embed = discord.Embed(
-                description="**Error:** Apologies, only admins are able to execute a command this powerful.",
-                color=discord.Color.red(),
-            )
-            await ctx.send(embed=embed)
-            return
-
-    @commands.slash_command(description="Resets the economy of the guild", pass_context=True)
+    @commands.slash_command(description="Resets the economy of the guild")
     @commands.has_permissions(administrator=True)
     async def reset_economy(self, ctx):
         await ctx.defer()
+
+        strings = await get_language_strings(ctx)
 
         with open("Data/economics.json", "r") as economy_file:
             users = json.load(economy_file)
@@ -275,7 +255,7 @@ class Admin(commands.Cog):
                         json.dump(users, economy_file_, indent=4)
 
             embed_ = discord.Embed(
-                description=f"The economy of **{ctx.guild.name}** has been reset.",
+                description=strings["Admin.EconomyResetSuccess"].format(ctx.guild.name),
                 color=discord.Color.dark_red(),
             )
             view.remove_item(yes_button), view.remove_item(no_button)
@@ -283,7 +263,7 @@ class Admin(commands.Cog):
 
         async def no_button_callback(interaction: discord.Interaction):
             embed_ = discord.Embed(
-                description=f"The economy reset for **{ctx.guild.name}** has been cancelled.",
+                description=strings["Admin.EconomyResetCancel"].format(ctx.guild.name),
                 color=discord.Color.dark_red(),
             )
             view.remove_item(yes_button), view.remove_item(no_button)
@@ -294,10 +274,68 @@ class Admin(commands.Cog):
         view.add_item(yes_button), view.add_item(no_button)
 
         embed = discord.Embed(
-            description=f"Are you sure you wish to reset the economy of **{ctx.guild.name}**?",
+            description=strings["Admin.EconomyReset"].format(ctx.guild.name),
             color=discord.Color.dark_green(),
         )
         await ctx.followup.send(embed=embed, view=view)
+
+    @commands.slash_command(description="Change the guild specific settings")
+    @option(name="language", description="The name of the language file, without the '.json' suffix", required=False)
+    @commands.has_permissions(administrator=True)
+    async def settings(self, ctx, language: str = None):
+        strings = await get_language_strings(ctx)
+
+        with open("Data/settings.json", "r") as settings_file:
+            settings = json.load(settings_file)
+
+        if not language:
+            available_languages = [lang.split(".")[0] for lang in os.listdir("Locales") if lang.split(".")[1] == "json"]
+            joined_available_languages = "\n".join(available_languages)
+
+            embed = discord.Embed(
+                description=strings["Settings.Desc"].format(settings[str(ctx.guild.id)], joined_available_languages),
+                color=discord.Color.dark_gold()
+            )
+            try:
+                embed.set_author(name=strings["Settings.Title"], icon_url=ctx.guild.icon.url)
+            except AttributeError:
+                embed.set_author(name=strings["Settings.Title"])
+            await ctx.response.send_message(embed=embed)
+            return
+        elif not os.path.exists(f"Locales/{language}.json"):
+            embed = discord.Embed(
+                description=strings["Errors.LanguageFileNotFound"].format(language),
+                color=discord.Color.red()
+            )
+            await ctx.response.send_message(embed=embed)
+            return
+
+        settings[ctx.guild.id] = language
+
+        with open("Data/settings.json", "w") as settings_file:
+            json.dump(settings, settings_file, indent=4)
+
+        embed = discord.Embed(
+            description=strings["Settings.Language"].format(ctx.guild.name, language),
+            color=discord.Color.dark_green()
+        )
+        await ctx.response.send_message(embed=embed)
+
+    @roleassign.error
+    @joinrole.error
+    @msgdel.error
+    @reset_economy.error
+    @settings.error
+    async def reset_economy_error(self, ctx, error):
+        if isinstance(error, CheckFailure):
+            strings = await get_language_strings(ctx)
+
+            embed = discord.Embed(
+                description=strings["Errors.AdminOnly"],
+                color=discord.Color.red(),
+            )
+            await ctx.send(embed=embed)
+            return
 
 
 def setup(bot):

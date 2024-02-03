@@ -10,7 +10,7 @@ import requests
 import yt_dlp.utils
 import googleapiclient.errors
 from concurrent.futures import ThreadPoolExecutor
-from Cogs.utils import format_duration, parse_timestamp, connect_handling, Constants
+from Cogs.utils import format_duration, parse_timestamp, connect_handling, get_language_strings, Constants
 
 
 QUEUE = {}
@@ -66,17 +66,20 @@ class Music(commands.Cog):
         if member.guild.voice_client and member.guild.voice_client.channel == before.channel:
             text_channel = self.bot.get_channel(PLAYER_INFO.get(member.guild.id, {}).get("TextChannel"))
 
-            if len(channel.members) < 2 or all([member.bot for member in channel.members]):
+            if (len(channel.members) == 1 and channel.members[0].id == 870702473126490132) or \
+                    all([member.bot for member in channel.members]):
                 await self.cleanup(member)
 
                 if member.guild.voice_client and member.guild.voice_client.is_connected():
+                    strings = await get_language_strings(member)
+
                     await member.guild.voice_client.disconnect()
 
                     embed = discord.Embed(
-                        description=f"**Everyone has left the voice channel:** {before.channel}",
+                        description=strings["Music.EmptyChannel"].format(before.channel),
                         color=discord.Color.dark_red(),
                     )
-                    embed.set_footer(text="Disconnecting, until next time.")
+                    embed.set_footer(text=strings["Music.Disconnecting"])
                     await text_channel.send(embed=embed)
 
     @tasks.loop()
@@ -139,8 +142,21 @@ class Music(commands.Cog):
             return
 
     @staticmethod
+    async def button_edit_handling(ctx, interaction, views):
+        if len(QUEUE[ctx.guild.id]["Current"]) - 1 < 1 and not QUEUE[ctx.guild.id]["Previous"]:
+            await interaction.response.edit_message(view=views[0])
+        elif len(QUEUE[ctx.guild.id]["Current"]) - 1 >= 1 and not QUEUE[ctx.guild.id]["Previous"]:
+            await interaction.response.edit_message(view=views[1])
+        elif len(QUEUE[ctx.guild.id]["Current"]) - 1 < 1 and QUEUE[ctx.guild.id]["Previous"]:
+            await interaction.response.edit_message(view=views[2])
+        else:
+            await interaction.response.edit_message(view=views[3])
+
+    @staticmethod
     async def song_deletion_handling(ctx, player):
         if PLAYER_MOD[ctx.guild.id]["Loop"] == "Queue":
+            if len(QUEUE[ctx.guild.id]["Current"]) - 1 < 1:
+                PLAYER_INFO[ctx.guild.id]["LoopCount"] += 1
             QUEUE[ctx.guild.id]["Current"].append(player.url)
         elif PLAYER_MOD[ctx.guild.id]["Loop"] == "Single":
             QUEUE[ctx.guild.id]["Current"].insert(1, player.url)
@@ -153,6 +169,8 @@ class Music(commands.Cog):
         PLAYER_INFO[ctx.guild.id]["Backed"] = False
 
     async def resolve_player_start(self, ctx, query: str, timestamp: str):
+        strings = await get_language_strings(ctx)
+
         try:
             if timestamp:
                 timer_value = await parse_timestamp(ctx, timestamp=timestamp)
@@ -166,14 +184,14 @@ class Music(commands.Cog):
                 player = await YTDLSource.from_url(query.split("&list=")[0], loop=self.bot.loop, stream=True)
         except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError):
             embed = discord.Embed(
-                description="**Error:** Video unavailable.",
+                description=strings["Errors.VideoUnavailable"],
                 color=discord.Color.red()
             )
             await ctx.respond(embed=embed)
             return
         except IndexError:
             embed = discord.Embed(
-                description="**Error:** No search results for query.",
+                description=strings["Errors.NoResults"],
                 color=discord.Color.red()
             )
             await ctx.respond(embed=embed)
@@ -188,8 +206,7 @@ class Music(commands.Cog):
             self.duration_counter.cancel()
 
         try:
-            channel = self.bot.get_guild(int(ctx.guild.id)).get_channel(
-                PLAYER_INFO[ctx.guild.id]["TextChannel"])
+            channel = self.bot.get_guild(int(ctx.guild.id)).get_channel(PLAYER_INFO[ctx.guild.id]["TextChannel"])
             message = await channel.fetch_message(PLAYER_INFO[ctx.guild.id]["EmbedID"])
             await message.edit(view=None)
         except (discord.NotFound, discord.HTTPException, AttributeError, KeyError, UnboundLocalError):
@@ -231,6 +248,7 @@ class Music(commands.Cog):
         except (discord.ApplicationCommandInvokeError, discord.InteractionResponded, discord.NotFound):
             pass
 
+        strings = await get_language_strings(ctx)
         channel = await connect_handling(ctx, play_command=True)
 
         if not channel:
@@ -249,14 +267,19 @@ class Music(commands.Cog):
                               emoji="<:playpause:1086408066490183700>", row=2)
         skip_button = Button(style=discord.ButtonStyle.secondary, label="Skip",
                              emoji="<:skip:1086405128787067001>", row=2)
-        remove_button = Button(style=discord.ButtonStyle.danger, label="Remove →",
-                               emoji="<:ShifuR_trash:1086397311040626769>", row=3)
+        remove_button = Button(style=discord.ButtonStyle.danger, emoji="<:remove:1197082264924852325>", row=2)
 
         async def pause_button_callback(interaction: discord.Interaction):
             PLAYER_INFO[ctx.guild.id]["ButtonInvoke"] = interaction.user.name
             await self.pause(ctx)
+
+            if ctx.voice_client and ctx.voice_client.is_paused():
+                pause_button.style = discord.ButtonStyle.primary
+            else:
+                pause_button.style = discord.ButtonStyle.secondary
+
             PLAYER_INFO[ctx.guild.id]["ButtonInvoke"] = None
-            await interaction.response.defer()
+            await self.button_edit_handling(ctx, interaction, views=[view, view2, view3, view4])
 
         async def skip_button_callback(interaction: discord.Interaction):
             PLAYER_INFO[ctx.guild.id]["ButtonInvoke"] = interaction.user.name
@@ -268,12 +291,7 @@ class Music(commands.Cog):
             PLAYER_INFO[ctx.guild.id]["ButtonInvoke"] = interaction.user.name
             await self.remove(ctx, from_="1")
             PLAYER_INFO[ctx.guild.id]["ButtonInvoke"] = None
-            await interaction.response.defer()
-
-            if len(QUEUE[ctx.guild.id]["Current"]) - 1 < 1 and not QUEUE[ctx.guild.id]["Previous"]:
-                await interaction.followup.edit_message(message_id=PLAYER_INFO[ctx.guild.id]["EmbedID"], view=view)
-            elif len(QUEUE[ctx.guild.id]["Current"]) - 1 < 1 and QUEUE[ctx.guild.id]["Previous"]:
-                await interaction.followup.edit_message(message_id=PLAYER_INFO[ctx.guild.id]["EmbedID"], view=view3)
+            await self.button_edit_handling(ctx, interaction, views=[view, view2, view3, view4])
 
         async def back_button_callback(interaction: discord.Interaction):
             PLAYER_INFO[ctx.guild.id]["ButtonInvoke"] = interaction.user.name
@@ -316,13 +334,16 @@ class Music(commands.Cog):
 
             if PLAYER_MOD[ctx.guild.id]["Loop"] == "Disabled":
                 await self.loop(ctx, mode="Single")
+                loop_button.style = discord.ButtonStyle.primary
             elif PLAYER_MOD[ctx.guild.id]["Loop"] == "Single":
                 await self.loop(ctx, mode="Queue")
+                loop_button.style = discord.ButtonStyle.success
             else:
                 await self.loop(ctx, mode="Disabled")
+                loop_button.style = discord.ButtonStyle.secondary
 
             PLAYER_INFO[ctx.guild.id]["ButtonInvoke"] = None
-            await interaction.response.defer()
+            await self.button_edit_handling(ctx, interaction, views=[view, view2, view3, view4])
 
         button_callbacks = {pause_button: pause_button_callback, skip_button: skip_button_callback,
                             remove_button: remove_button_callback, back_button: back_button_callback,
@@ -341,7 +362,7 @@ class Music(commands.Cog):
         elif query.startswith(("http://", "https://", "www.")) and not ("youtu" in query or "open.spotify.com/"
                                                                         in query or "soundcloud.com/" in query):
             embed = discord.Embed(
-                description=f"**Error:** Invalid URL.",
+                description=strings["Errors.InvalidURL"],
                 color=discord.Color.red(),
             )
             await ctx.respond(embed=embed)
@@ -349,7 +370,7 @@ class Music(commands.Cog):
         elif not query.startswith(("http://", "https://")) and ("open.spotify.com/" in query or
                                                                 "soundcloud.com/" in query):
             embed = discord.Embed(
-                description=f"**Note:** Please provide the entire URL, including the `https://` prefix.",
+                description=strings["Notes.EntireURL"],
                 color=discord.Color.blue(),
             )
             await ctx.respond(embed=embed)
@@ -366,15 +387,15 @@ class Music(commands.Cog):
                     QUEUE[ctx.guild.id]["Current"].insert(insert, player)
                 else:
                     QUEUE[ctx.guild.id]["Current"].append(player)
-                queue_pos = QUEUE[ctx.guild.id]['Current'].index(player)
+                queue_pos = QUEUE[ctx.guild.id]["Current"].index(player)
 
                 embed = discord.Embed(
-                    description=f"**Note:** Unsupported playlist type; first song added to queue.\n"
-                                f"**{'Inserted' if insert else 'Added'} to queue:** ["
-                                f"{QUEUE[ctx.guild.id]['Current'][QUEUE[ctx.guild.id]['Current'].index(player)].title}]"
-                                f"({QUEUE[ctx.guild.id]['Current'][QUEUE[ctx.guild.id]['Current'].index(player)].url}) "
-                                f"[**{player.start_at + ' → ' if start_at else ''}{player.formatted_duration}**] "
-                                f"[**{queue_pos if queue_pos else 1}**]",
+                    description=strings["Notes.UnsupportedPlaylist"].format(
+                        strings["Music.Inserted"] if insert else strings["Music.Added"],
+                        QUEUE[ctx.guild.id]["Current"][QUEUE[ctx.guild.id]["Current"].index(player)].title,
+                        QUEUE[ctx.guild.id]["Current"][QUEUE[ctx.guild.id]["Current"].index(player)].url,
+                        player.start_at + " → " if start_at else "", player.formatted_duration,
+                        queue_pos if queue_pos else 1),
                     color=discord.Color.blue(),
                 )
                 await ctx.respond(embed=embed)
@@ -385,9 +406,8 @@ class Music(commands.Cog):
                     playlist_entries = Playlist(f"https://www.youtube.com/playlist?list={query.split('list=')[1]}")
 
                     embed = discord.Embed(
-                        description=f"Adding to queue **{len(playlist_entries)}** songs from the playlist: "
-                                    f"[{playlist_entries.title}]({query})\n"
-                                    f"This will take **a moment**...",
+                        description=strings["Music.AddPlaylist"].format(
+                            len(playlist_entries), playlist_entries.title, query),
                         color=discord.Color.dark_green(),
                     )
                     main = await ctx.respond(embed=embed)
@@ -425,10 +445,9 @@ class Music(commands.Cog):
                         QUEUE[ctx.guild.id]["Current"][-1 - len(playlist_entries):-1] = copy
 
                     embed = discord.Embed(
-                        description=f"Successfully added **{len(playlist_entries)}** songs to queue"
-                                    f"{' **pre-shuffled**' if pre_shuffle else ''} from the playlist: "
-                                    f"[{playlist_entries.title}]({query}) "
-                                    f"[**{PLAYER_INFO[ctx.guild.id]['ListDuration']}**]",
+                        description=strings["Music.SuccessAddPlaylist"].format(
+                            len(playlist_entries), strings["Music.PreShuffled"] if pre_shuffle else "",
+                            playlist_entries.title, query, PLAYER_INFO[ctx.guild.id]["ListDuration"]),
                         color=discord.Color.dark_green(),
                     )
                     await main.edit(embed=embed)
@@ -446,7 +465,7 @@ class Music(commands.Cog):
 
                 except KeyError:
                     embed = discord.Embed(
-                        description=f"**Error:** There has been an error with the reading of the playlist.",
+                        description=strings["Errors.PlaylistRead"],
                         color=discord.Color.red(),
                     )
                     await ctx.respond(embed=embed)
@@ -467,7 +486,7 @@ class Music(commands.Cog):
             except Exception as exc:
                 print(f"Spotify error: {exc} [{type(exc).__name__}]")
                 embed = discord.Embed(
-                    description=f"**Error:** Invalid Spotify URL.",
+                    description=strings["Errors.InvalidURLSpotify"],
                     color=discord.Color.red(),
                 )
                 await ctx.respond(embed=embed)
@@ -481,17 +500,13 @@ class Music(commands.Cog):
 
             if "playlist/" in query:
                 embed = discord.Embed(
-                    description=f"Adding to queue **{len(tracks)}** songs from the Spotify playlist: "
-                                f"[{playlist_name}]({query})\n"
-                                f"This will take **a moment**...",
+                    description=strings["Music.AddPlaylistSpotify"].format(len(tracks), playlist_name, query),
                     color=discord.Color.dark_green(),
                 )
                 main = await ctx.respond(embed=embed)
             else:
                 embed = discord.Embed(
-                    description=f"Adding to queue **{len(tracks)}** songs from the Spotify album: "
-                                f"[{album_name}]({query})\n"
-                                f"This will take **a moment**...",
+                    description=strings["Music.AddAlbumSpotify"].format(len(tracks), album_name, query),
                     color=discord.Color.dark_green(),
                 )
                 main = await ctx.respond(embed=embed)
@@ -510,7 +525,7 @@ class Music(commands.Cog):
                             QUEUE[ctx.guild.id]["Current"].append(f"{track['artists'][0]['name']} - "
                                                                   f"{track['name']}")
                         else:
-                            QUEUE[ctx.guild.id]["Current"].append(track['name'])
+                            QUEUE[ctx.guild.id]["Current"].append(track["name"])
                         PLAYER_INFO[ctx.guild.id]["ListSec"] += track["duration_ms"]
                 except IndexError:
                     if "playlist/" in query:
@@ -532,11 +547,11 @@ class Music(commands.Cog):
                 QUEUE[ctx.guild.id]["Current"][-1 - (len(tracks) - 1):-1] = copy
 
             embed = discord.Embed(
-                description=f"Successfully added **{len(tracks)}** songs to queue"
-                            f"{' **pre-shuffled**' if pre_shuffle else ''} from the Spotify "
-                            f"{'playlist' if 'playlist/' in query else 'album'}: "
-                            f"[{playlist_name if 'playlist/' in query else album_name}]({query}) "
-                            f"[**~{PLAYER_INFO[ctx.guild.id]['ListDuration']}**]",
+                description=strings["Music.SuccessAddPlaylistSpotify"].format(
+                    len(tracks), strings["Music.PreShuffled"] if pre_shuffle else "",
+                    strings["Music.Playlist"] if "playlist/" in query else strings["Music.Album"],
+                    playlist_name if "playlist/" in query else album_name, query,
+                    PLAYER_INFO[ctx.guild.id]["ListDuration"]),
                 color=discord.Color.dark_green(),
             )
             await main.edit(embed=embed)
@@ -557,7 +572,7 @@ class Music(commands.Cog):
                 except Exception as exc:
                     print(f"Spotify error: {exc} [{type(exc).__name__}]")
                     embed = discord.Embed(
-                        description=f"**Error:** Invalid Spotify URL.",
+                        description=strings["Errors.InvalidURLSpotify"],
                         color=discord.Color.red(),
                     )
                     await ctx.respond(embed=embed)
@@ -580,9 +595,8 @@ class Music(commands.Cog):
                     PLAYER_INFO[ctx.guild.id]["ListDuration"] = ""
 
                     embed = discord.Embed(
-                        description=f"Adding to queue **{soundcloud_query.track_count}** songs from the SoundCloud "
-                                    f"playlist: [{soundcloud_query.title}]({query})\n"
-                                    f"This will take **a moment**...",
+                        description=strings["Music.AddPlaylistSoundCloud"].format(
+                            soundcloud_query.track_count, soundcloud_query.title, query),
                         color=discord.Color.dark_green(),
                     )
                     main = await ctx.respond(embed=embed)
@@ -600,10 +614,9 @@ class Music(commands.Cog):
                         QUEUE[ctx.guild.id]["Current"][-1 - (soundcloud_query.track_count - 1):-1] = copy
 
                     embed = discord.Embed(
-                        description=f"Successfully added **{soundcloud_query.track_count}** songs to queue"
-                                    f"{' **pre-shuffled**' if pre_shuffle else ''} from the SoundCloud playlist: "
-                                    f"[{soundcloud_query.title}]({query}) "
-                                    f"[**~{PLAYER_INFO[ctx.guild.id]['ListDuration']}**]\n",
+                        description=strings["Music.SuccessAddPlaylistSoundCloud"].format(
+                            soundcloud_query.track_count, strings["Music.PreShuffled"] if pre_shuffle else "",
+                            soundcloud_query.title, query, PLAYER_INFO[ctx.guild.id]["ListDuration"]),
                         color=discord.Color.dark_green(),
                     )
                     await main.edit(embed=embed)
@@ -619,7 +632,7 @@ class Music(commands.Cog):
                     modified_query = None
                 else:
                     embed = discord.Embed(
-                        description="**Error:** Invalid Soundcloud URL.",
+                        description=strings["Errors.InvalidURLSoundCloud"],
                         color=discord.Color.red()
                     )
                     await ctx.respond(embed=embed)
@@ -648,7 +661,7 @@ class Music(commands.Cog):
                     video_url = modified_query
                 except BrokenPipeError:
                     embed = discord.Embed(
-                        description="**Error:** Broken pipe. Please try again.",
+                        description=strings["Errors.BrokenPipe"],
                         color=discord.Color.red()
                     )
                     await ctx.respond(embed=embed)
@@ -668,11 +681,12 @@ class Music(commands.Cog):
                     PLAYER_INFO[ctx.guild.id]["First"] = True
                 else:
                     embed = discord.Embed(
-                        description=f"**{'Inserted' if insert else 'Added'} to queue:** ["
-                                    f"{QUEUE[ctx.guild.id]['Current'][QUEUE[ctx.guild.id]['Current'].index(player)].title}]"
-                                    f"({QUEUE[ctx.guild.id]['Current'][QUEUE[ctx.guild.id]['Current'].index(player)].url}) "
-                                    f"[**{player.start_at + ' → ' if start_at else ''}{player.formatted_duration}**] "
-                                    f"[**{QUEUE[ctx.guild.id]['Current'].index(player)}**]",
+                        description=strings["Music.AddQuery"].format(
+                            strings["Music.Inserted"] if insert else strings["Music.Added"],
+                            QUEUE[ctx.guild.id]["Current"][QUEUE[ctx.guild.id]["Current"].index(player)].title,
+                            QUEUE[ctx.guild.id]["Current"][QUEUE[ctx.guild.id]["Current"].index(player)].url,
+                            player.start_at + " → " if start_at else "", player.formatted_duration,
+                            QUEUE[ctx.guild.id]["Current"].index(player)),
                         color=discord.Color.dark_green()
                     )
                     await ctx.respond(embed=embed)
@@ -710,19 +724,30 @@ class Music(commands.Cog):
 
                         PLAY_TIMER[ctx.guild.id]["Raw"], PLAY_TIMER[ctx.guild.id]["Act"] = 0, ""
 
+                        if PLAYER_MOD[ctx.guild.id]["Loop"] == "Disabled":
+                            loop_button.style = discord.ButtonStyle.secondary
+                        elif PLAYER_MOD[ctx.guild.id]["Loop"] == "Single":
+                            loop_button.style = discord.ButtonStyle.primary
+                        else:
+                            loop_button.style = discord.ButtonStyle.success
+                        pause_button.style = discord.ButtonStyle.secondary
+
                         try:
                             if PLAYER_INFO[ctx.guild.id]["EmbedID"]:
                                 channel = self.bot.get_guild(int(ctx.guild.id)).get_channel(
                                     PLAYER_INFO[ctx.guild.id]["TextChannel"])
                                 message = await channel.fetch_message(PLAYER_INFO[ctx.guild.id]["EmbedID"])
 
-                                if PLAYER_MOD[ctx.guild.id]["Loop"] != "Single":
+                                if PLAYER_MOD[ctx.guild.id]["Loop"] != "Single" and not \
+                                        (PLAYER_MOD[ctx.guild.id]["Loop"] == "Queue" and
+                                         len(QUEUE[ctx.guild.id]["Current"]) - 1 < 1):
                                     await message.edit(view=None)
                                     PLAYER_INFO[ctx.guild.id]["LoopCount"] = 0
                                 else:
                                     embed = discord.Embed(
-                                        description=f"{PLAYER_INFO[ctx.guild.id]['Embed'].description}\n\n"
-                                                    f"**Looped:** **{PLAYER_INFO[ctx.guild.id]['LoopCount']}** time(s)",
+                                        description=strings["Music.LoopCount"].format(
+                                            PLAYER_INFO[ctx.guild.id]["Embed"].description,
+                                            PLAYER_INFO[ctx.guild.id]["LoopCount"]),
                                         color=discord.Color.dark_green()
                                     )
                                     embed.set_footer(text=PLAYER_INFO[ctx.guild.id]["Embed"].footer.text,
@@ -752,7 +777,7 @@ class Music(commands.Cog):
                             uploader_picture_url = None
                         except BrokenPipeError:
                             embed = discord.Embed(
-                                description="**Error:** Broken pipe. Please try again.",
+                                description=strings["Errors.BrokenPipe"],
                                 color=discord.Color.red()
                             )
                             await ctx.respond(embed=embed)
@@ -790,15 +815,12 @@ class Music(commands.Cog):
                             if PLAYER_MOD[ctx.guild.id]["Loop"] == "Queue" and \
                                     player.title != QUEUE[ctx.guild.id]["Current"][1].title:
                                 embed = discord.Embed(
-                                    description=f"**∞ Now in loop:** [{player.title}]({player.url}) "
-                                                f"[**{player.start_at + ' → ' if player.start_at else ''}"
-                                                f"{player.formatted_duration}**] "
-                                                f"[**{len(QUEUE[ctx.guild.id]['Previous']) + 1}** | "
-                                                f"**{QUEUE[ctx.guild.id]['Sum']}**]\n"
-                                                f"**Next in loop:** "
-                                                f"[{QUEUE[ctx.guild.id]['Current'][1].title}]"
-                                                f"({QUEUE[ctx.guild.id]['Current'][1].url})",
-                                    color=discord.Color.dark_green(),
+                                    description=strings["Music.Looping"].format(
+                                        player.title, player.url, player.start_at + " → " if player.start_at else "",
+                                        player.formatted_duration, len(QUEUE[ctx.guild.id]["Previous"]) + 1,
+                                        QUEUE[ctx.guild.id]["Sum"], QUEUE[ctx.guild.id]["Current"][1].title,
+                                        QUEUE[ctx.guild.id]["Current"][1].url),
+                                    color=discord.Color.dark_green()
                                 )
                                 embed.set_footer(text=player.uploader, icon_url=uploader_picture_url)
                                 PLAYER_INFO[ctx.guild.id]["Embed"] = embed
@@ -817,17 +839,13 @@ class Music(commands.Cog):
                                     else:
                                         embed_message = await ctx.respond(embed=embed, view=view4)
                                         PLAYER_INFO[ctx.guild.id]["EmbedID"] = embed_message.id
-                            elif not (PLAYER_MOD[ctx.guild.id]["Loop"] == "Queue" or
-                                      PLAYER_MOD[ctx.guild.id]["Loop"] == "Single"):
+                            elif PLAYER_MOD[ctx.guild.id]["Loop"] == "Disabled":
                                 embed = discord.Embed(
-                                    description=f"**♪ Now playing:** [{player.title}]({player.url}) "
-                                                f"[**{player.start_at + ' → ' if player.start_at else ''}"
-                                                f"{player.formatted_duration}**] "
-                                                f"[**{len(QUEUE[ctx.guild.id]['Previous']) + 1}** | "
-                                                f"**{QUEUE[ctx.guild.id]['Sum']}**]\n"
-                                                f"**Next in queue:** "
-                                                f"[{QUEUE[ctx.guild.id]['Current'][1].title}]"
-                                                f"({QUEUE[ctx.guild.id]['Current'][1].url})",
+                                    description=strings["Music.Playing"].format(
+                                        player.title, player.url, player.start_at + " → " if player.start_at else "",
+                                        player.formatted_duration, len(QUEUE[ctx.guild.id]["Previous"]) + 1,
+                                        QUEUE[ctx.guild.id]["Sum"], QUEUE[ctx.guild.id]["Current"][1].title,
+                                        QUEUE[ctx.guild.id]["Current"][1].url),
                                     color=discord.Color.dark_green(),
                                 )
                                 embed.set_footer(text=player.uploader, icon_url=uploader_picture_url)
@@ -848,15 +866,12 @@ class Music(commands.Cog):
                                         embed_message = await ctx.respond(embed=embed, view=view4)
                                         PLAYER_INFO[ctx.guild.id]["EmbedID"] = embed_message.id
                         else:
-                            if PLAYER_INFO[ctx.guild.id]["First"] and (PLAYER_MOD[ctx.guild.id]["Loop"] == "Queue" or
-                                                                       PLAYER_MOD[ctx.guild.id]["Loop"] == "Single"):
+                            if PLAYER_INFO[ctx.guild.id]["First"] and PLAYER_MOD[ctx.guild.id]["Loop"] != "Disabled":
                                 embed = discord.Embed(
-                                    description=f"**∞ Now in loop:** [{player.title}]({player.url}) "
-                                                f"[**{player.start_at + ' → ' if player.start_at else ''}"
-                                                f"{player.formatted_duration}**] "
-                                                f"[**{len(QUEUE[ctx.guild.id]['Previous']) + 1}** | "
-                                                f"**{QUEUE[ctx.guild.id]['Sum']}**]\n"
-                                                f"**Note:** No further songs in queue.",
+                                    description=strings["Music.LoopingLast"].format(
+                                        player.title, player.url, player.start_at + " → " if player.start_at else "",
+                                        player.formatted_duration, len(QUEUE[ctx.guild.id]["Previous"]) + 1,
+                                        QUEUE[ctx.guild.id]["Sum"]),
                                     color=discord.Color.dark_green(),
                                 )
                                 embed.set_footer(text=player.uploader, icon_url=uploader_picture_url)
@@ -868,15 +883,12 @@ class Music(commands.Cog):
                                 else:
                                     embed_message = await ctx.respond(embed=embed, view=view3)
                                     PLAYER_INFO[ctx.guild.id]["EmbedID"] = embed_message.id
-                            elif not (PLAYER_MOD[ctx.guild.id]["Loop"] == "Queue" or
-                                      PLAYER_MOD[ctx.guild.id]["Loop"] == "Single"):
+                            elif PLAYER_MOD[ctx.guild.id]["Loop"] == "Disabled":
                                 embed = discord.Embed(
-                                    description=f"**♪ Now playing:** [{player.title}]({player.url}) "
-                                                f"[**{player.start_at + ' → ' if player.start_at else ''}"
-                                                f"{player.formatted_duration}**] "
-                                                f"[**{len(QUEUE[ctx.guild.id]['Previous']) + 1}** | "
-                                                f"**{QUEUE[ctx.guild.id]['Sum']}**]\n"
-                                                f"**Note:** No further songs in queue.",
+                                    description=strings["Music.PlayingLast"].format(
+                                        player.title, player.url, player.start_at + " → " if player.start_at else "",
+                                        player.formatted_duration, len(QUEUE[ctx.guild.id]["Previous"]) + 1,
+                                        QUEUE[ctx.guild.id]["Sum"]),
                                     color=discord.Color.dark_green(),
                                 )
                                 embed.set_footer(text=player.uploader, icon_url=uploader_picture_url)
@@ -897,7 +909,11 @@ class Music(commands.Cog):
                                         embed_message = await ctx.respond(embed=embed, view=view3)
                                         PLAYER_INFO[ctx.guild.id]["EmbedID"] = embed_message.id
 
-                        if PLAYER_MOD[ctx.guild.id]["Loop"] != "Single":
+                        PLAYER_INFO[ctx.guild.id]["TextChannel"] = ctx.channel.id
+
+                        if PLAYER_MOD[ctx.guild.id]["Loop"] != "Single" and not \
+                                (PLAYER_MOD[ctx.guild.id]["Loop"] == "Queue" and
+                                 len(QUEUE[ctx.guild.id]["Current"]) - 1 < 1):
                             PLAYER_INFO[ctx.guild.id]["PauseMsg"] = None
                             PLAYER_INFO[ctx.guild.id]["VolMsg"] = None
                             PLAYER_INFO[ctx.guild.id]["RmvMsg"] = None
@@ -913,7 +929,7 @@ class Music(commands.Cog):
                         await self.cleanup(ctx)
                     elif isinstance(exc, yt_dlp.DownloadError):
                         embed = discord.Embed(
-                            description=f"**Error:** Failed to stream query `{QUEUE[ctx.guild.id]['Current'].pop(0)}`.",
+                            description=strings["Errors.StreamFailure"].format(QUEUE[ctx.guild.id]["Current"].pop(0)),
                             color=discord.Color.red()
                         )
                         await ctx.send(embed=embed)
@@ -932,13 +948,15 @@ class Music(commands.Cog):
         except (discord.ApplicationCommandInvokeError, discord.InteractionResponded):
             pass
 
+        strings = await get_language_strings(ctx)
+
         if len(QUEUE[ctx.guild.id]["Current"]) - 1 < 1:
             embed = discord.Embed(
-                description="**Error:** Queue is already empty.",
-                color=discord.Color.red(),
+                description=strings["Errors.QueueEmpty"],
+                color=discord.Color.red()
             )
             if PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]:
-                embed.set_footer(text=f"Requested via a button [{PLAYER_INFO[ctx.guild.id]['ButtonInvoke']}]")
+                embed.set_footer(text=strings["Music.ButtonRequest"].format(PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]))
                 await ctx.send(embed=embed)
             else:
                 await ctx.respond(embed=embed)
@@ -966,8 +984,8 @@ class Music(commands.Cog):
 
             if len(valid_songs) == 0:
                 embed = discord.Embed(
-                    description=f"**Error:** Invalid positions given; no songs removed from queue.",
-                    color=discord.Color.red(),
+                    description=strings["Errors.InvalidPositions"],
+                    color=discord.Color.red()
                 )
                 await ctx.respond(embed=embed)
                 return
@@ -976,10 +994,8 @@ class Music(commands.Cog):
 
             if len(QUEUE[ctx.guild.id]["Current"]) - 1 < 1:
                 embed = discord.Embed(
-                    description=f"**⊝ Removed the following song(s) from queue:**\n"
-                                f"{formatted_valid_songs}\n"
-                                f"**Note:** Queue is now empty.",
-                    color=discord.Color.dark_red(),
+                    description=strings["Music.RemovedFollowingLast"].format(formatted_valid_songs),
+                    color=discord.Color.dark_red()
                 )
                 await ctx.respond(embed=embed)
             else:
@@ -988,18 +1004,16 @@ class Music(commands.Cog):
                                                                                   loop=self.bot.loop, stream=True)
 
                 embed = discord.Embed(
-                    description=f"**⊝ Removed the following song(s) from queue:**\n"
-                                f"{formatted_valid_songs}\n"
-                                f"**Next in queue:** {QUEUE[ctx.guild.id]['Current'][1].title}",
-                    color=discord.Color.dark_red(),
+                    description=strings["Music.RemovedFollowing"].format(
+                        formatted_valid_songs, QUEUE[ctx.guild.id]["Current"][1].title),
+                    color=discord.Color.dark_red()
                 )
                 await ctx.respond(embed=embed)
             return
         elif ";" not in from_ and not from_.isnumeric():
             embed = discord.Embed(
-                description="**Error:** The parameter `from_` must be an integer, or a set of positions separated "
-                            "by semicolons (i.e. pos1;pos2;...).",
-                color=discord.Color.red(),
+                description=strings["Errors.FromParameter"],
+                color=discord.Color.red()
             )
             await ctx.respond(embed=embed)
             return
@@ -1024,9 +1038,8 @@ class Music(commands.Cog):
             if len(QUEUE[ctx.guild.id]["Current"]) - 1 < 1:
                 if not PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]:
                     embed = discord.Embed(
-                        description=f"**⊝ Removed song:** {removed_player.title} [**{from_}**]\n"
-                                    f"**Note:** Queue is now empty.",
-                        color=discord.Color.dark_red(),
+                        description=strings["Music.RemovedLast"].format(removed_player.title, from_),
+                        color=discord.Color.dark_red()
                     )
                     await ctx.respond(embed=embed)
                 else:
@@ -1035,12 +1048,11 @@ class Music(commands.Cog):
                     joined_removed_songs = "\n".join(PLAYER_INFO[ctx.guild.id]["Removed"])
 
                     embed = discord.Embed(
-                        description=f"**⊝ Removed the following song(s) from queue:**\n"
-                                    f"{joined_removed_songs}\n"
-                                    f"**Note:** Queue is now empty.",
-                        color=discord.Color.dark_red(),
+                        description=strings["Music.RemovedFollowingLast"].format(joined_removed_songs),
+                        color=discord.Color.dark_red()
                     )
-                    embed.set_footer(text=f"Requested via a button [{PLAYER_INFO[ctx.guild.id]['ButtonInvoke']}]")
+                    embed.set_footer(text=strings["Music.ButtonRequest"].format(
+                        PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]))
 
                     if PLAYER_INFO[ctx.guild.id]["RmvMsg"]:
                         await PLAYER_INFO[ctx.guild.id]["RmvMsg"].edit(embed=embed)
@@ -1053,9 +1065,9 @@ class Music(commands.Cog):
 
                 if not PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]:
                     embed = discord.Embed(
-                        description=f"**⊝ Removed song:** {removed_player.title} [**{from_}**]\n"
-                                    f"**Next in queue:** {QUEUE[ctx.guild.id]['Current'][1].title}",
-                        color=discord.Color.dark_red(),
+                        description=strings["Music.Removed"].format(
+                            removed_player.title, from_, QUEUE[ctx.guild.id]["Current"][1].title),
+                        color=discord.Color.dark_red()
                     )
                     await ctx.respond(embed=embed)
                 else:
@@ -1065,12 +1077,12 @@ class Music(commands.Cog):
                     joined_removed_songs = "\n".join(PLAYER_INFO[ctx.guild.id]["Removed"])
 
                     embed = discord.Embed(
-                        description=f"**⊝ Removed the following song(s) from queue:**\n"
-                                    f"{joined_removed_songs}\n"
-                                    f"**Next in queue:** {QUEUE[ctx.guild.id]['Current'][1].title}",
-                        color=discord.Color.dark_red(),
+                        description=strings["Music.RemovedFollowing"].format(
+                            joined_removed_songs, QUEUE[ctx.guild.id]["Current"][1].title),
+                        color=discord.Color.dark_red()
                     )
-                    embed.set_footer(text=f"Requested via a button [{PLAYER_INFO[ctx.guild.id]['ButtonInvoke']}]")
+                    embed.set_footer(text=strings["Music.ButtonRequest"].format(
+                        PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]))
 
                     if PLAYER_INFO[ctx.guild.id]["RmvMsg"]:
                         await PLAYER_INFO[ctx.guild.id]["RmvMsg"].edit(embed=embed)
@@ -1081,9 +1093,8 @@ class Music(commands.Cog):
 
             if len(QUEUE[ctx.guild.id]["Current"]) - 1 < 1:
                 embed = discord.Embed(
-                    description=f"**⊝ Removed {abs(int(from_) - to) + 1}** songs from queue [**{from_}-{to}**]\n"
-                                f"**Note:** Queue is now empty.",
-                    color=discord.Color.dark_red(),
+                    description=strings["Music.RemovedRangeLast"].format(abs(int(from_) - to) + 1, from_, to),
+                    color=discord.Color.dark_red()
                 )
                 await ctx.respond(embed=embed)
             else:
@@ -1092,9 +1103,9 @@ class Music(commands.Cog):
                                                                                   loop=self.bot.loop, stream=True)
 
                 embed = discord.Embed(
-                    description=f"**⊝ Removed {abs(int(from_) - to) + 1}** songs from queue [**{from_}-{to}**]\n"
-                                f"**Next in queue:** {QUEUE[ctx.guild.id]['Current'][1].title}",
-                    color=discord.Color.dark_red(),
+                    description=strings["Music.RemovedRange"].format(
+                        abs(int(from_) - to) + 1, from_, to, QUEUE[ctx.guild.id]["Current"][1].title),
+                    color=discord.Color.dark_red()
                 )
                 await ctx.respond(embed=embed)
 
@@ -1113,28 +1124,29 @@ class Music(commands.Cog):
     async def view(self, ctx, to: int = None, from_: int = 1, seek: str = None):
         await ctx.defer()
 
+        strings = await get_language_strings(ctx)
+
         if not to:
             if len(QUEUE[ctx.guild.id]["Current"]) - 1 >= 10 and from_ == 1 and not seek:
                 to = 10
             else:
                 to = len(QUEUE[ctx.guild.id]["Current"])
 
-        queue_sum = len(QUEUE[ctx.guild.id]['Previous']) + (len(QUEUE[ctx.guild.id]["Current"]) - 1) + 1
+        queue_sum = len(QUEUE[ctx.guild.id]["Previous"]) + (len(QUEUE[ctx.guild.id]["Current"]) - 1) + 1
 
         if len(QUEUE[ctx.guild.id]["Current"]) - 1 < 1:
             embed = discord.Embed(
-                description="Queue is empty.",
-                color=discord.Color.dark_gold(),
+                description=strings["Music.QueueEmpty"],
+                color=discord.Color.dark_gold()
             )
+
             if ctx.voice_client and PLAY_TIMER[ctx.guild.id]["Act"] != "":
-                embed.set_footer(text=f"⮚ Now playing: {PLAYER_INFO[ctx.guild.id]['Title']} "
-                                      f"[{PLAY_TIMER[ctx.guild.id]['Act']} | "
-                                      f"{PLAYER_INFO[ctx.guild.id]['Object'].formatted_duration}] "
-                                      f"[{len(QUEUE[ctx.guild.id]['Previous']) + 1} | {queue_sum}]\n"
-                                      f"⮚ Volume: {int(PLAYER_MOD[ctx.guild.id]['Volume'] * 100)}% | "
-                                      f"Filter: {PLAYER_MOD[ctx.guild.id]['Filter']['Name']} "
-                                      f"[{PLAYER_MOD[ctx.guild.id]['Filter']['Intensity']}%] | "
-                                      f"Loop: {PLAYER_MOD[ctx.guild.id]['Loop']}")
+                embed.set_footer(text=strings["Music.NowPlaying"].format(
+                    PLAYER_INFO[ctx.guild.id]["Title"], PLAY_TIMER[ctx.guild.id]["Act"],
+                    PLAYER_INFO[ctx.guild.id]["Object"].formatted_duration, len(QUEUE[ctx.guild.id]["Previous"]) + 1,
+                    queue_sum, int(PLAYER_MOD[ctx.guild.id]["Volume"] * 100),
+                    PLAYER_MOD[ctx.guild.id]["Filter"]["Name"], PLAYER_MOD[ctx.guild.id]["Filter"]["Intensity"],
+                    PLAYER_MOD[ctx.guild.id]["Loop"]))
             await ctx.respond(embed=embed)
             return
 
@@ -1148,16 +1160,14 @@ class Music(commands.Cog):
 
         if not seek:
             embed = discord.Embed(
-                description=f"Fetching **{abs(from_ - to) + 1}** songs from the queue [**{from_}-{to}**]\n"
-                            f"This will take **a moment**...",
-                color=discord.Color.dark_gold(),
+                description=strings["Music.FetchingSongs"].format(abs(from_ - to) + 1, from_, to),
+                color=discord.Color.dark_gold()
             )
             await ctx.respond(embed=embed)
         else:
             embed = discord.Embed(
-                description=f"Seeking songs containing `{seek}` from the queue [**{from_}-{to}**]\n"
-                            f"This will take **a moment**...",
-                color=discord.Color.dark_gold(),
+                description=strings["Music.SeekingSongs"].format(seek, from_, to),
+                color=discord.Color.dark_gold()
             )
             await ctx.respond(embed=embed)
 
@@ -1190,69 +1200,62 @@ class Music(commands.Cog):
 
         if seek and len(positional_queue["Formatted"]) == 0:
             embed = discord.Embed(
-                description=f"No songs found in queue using the keywords `{seek}` [**{from_}-{to}**]",
-                color=discord.Color.dark_gold(),
+                description=strings["Music.SeekingSongsNotFound"].format(seek, from_, to),
+                color=discord.Color.dark_gold()
             )
             await ctx.edit(embed=embed)
             return
         elif seek and len(positional_queue["Formatted"]) > 0:
             embed = discord.Embed(
-                description=f"Successfully sought **{len(positional_queue['List'])}** songs "
-                            f"from queue [**{from_}-{to}**]",
-                color=discord.Color.dark_gold(),
+                description=strings["Music.SeekingSongsSuccess"].format(
+                    len(positional_queue["List"]), from_, to),
+                color=discord.Color.dark_gold()
             )
             await ctx.edit(embed=embed)
 
             embed = discord.Embed(
-                description=f"**In queue containing** `{seek}`**:**\n"
-                            f"{positional_queue['Formatted']}\n",
-                color=discord.Color.dark_gold(),
+                description=strings["Music.SeekingSongsInQueue"].format(seek, positional_queue["Formatted"]),
+                color=discord.Color.dark_gold()
             )
             if ctx.voice_client and PLAY_TIMER[ctx.guild.id]["Act"] != "":
-                embed.set_footer(text=f"⮚ Now playing: {PLAYER_INFO[ctx.guild.id]['Title']} "
-                                      f"[{PLAY_TIMER[ctx.guild.id]['Act']} | "
-                                      f"{PLAYER_INFO[ctx.guild.id]['Object'].formatted_duration}] "
-                                      f"[{len(QUEUE[ctx.guild.id]['Previous']) + 1} | {queue_sum}]\n"
-                                      f"⮚ Volume: {int(PLAYER_MOD[ctx.guild.id]['Volume'] * 100)}% | "
-                                      f"Filter: {PLAYER_MOD[ctx.guild.id]['Filter']['Name']} "
-                                      f"[{PLAYER_MOD[ctx.guild.id]['Filter']['Intensity']}%] | "
-                                      f"Loop: {PLAYER_MOD[ctx.guild.id]['Loop']}")
+                embed.set_footer(text=strings["Music.NowPlaying"].format(
+                    PLAYER_INFO[ctx.guild.id]["Title"], PLAY_TIMER[ctx.guild.id]["Act"],
+                    PLAYER_INFO[ctx.guild.id]["Object"].formatted_duration, len(QUEUE[ctx.guild.id]["Previous"]) + 1,
+                    queue_sum, int(PLAYER_MOD[ctx.guild.id]["Volume"] * 100),
+                    PLAYER_MOD[ctx.guild.id]["Filter"]["Name"], PLAYER_MOD[ctx.guild.id]["Filter"]["Intensity"],
+                    PLAYER_MOD[ctx.guild.id]["Loop"]))
             await ctx.send(embed=embed)
             return
 
         if len(positional_queue["Formatted"]) >= 3952:
             embed = discord.Embed(
-                description=f"Successfully fetched **{len(positional_queue['List'])}** out of"
-                            f" **{abs(from_ - to) + 1}** songs [**{from_}-{to}**]",
-                color=discord.Color.dark_gold(),
+                description=strings["Music.FetchingSongsSuccess"].format(
+                    len(positional_queue["List"]), abs(from_ - to) + 1, from_, to),
+                color=discord.Color.dark_gold()
             )
             await ctx.edit(embed=embed)
 
             embed = discord.Embed(
-                description=f"**In queue:**\n"
-                            f"{positional_queue['Formatted']}\n",
-                color=discord.Color.dark_gold(),
+                description=strings["Music.FetchingSongsInQueue"].format(positional_queue["Formatted"]),
+                color=discord.Color.dark_gold()
             )
             if ctx.voice_client and PLAY_TIMER[ctx.guild.id]["Act"] != "":
-                embed.set_footer(text=f"⮚ Now playing: {PLAYER_INFO[ctx.guild.id]['Title']} "
-                                      f"[{PLAY_TIMER[ctx.guild.id]['Act']} | "
-                                      f"{PLAYER_INFO[ctx.guild.id]['Object'].formatted_duration}] "
-                                      f"[{len(QUEUE[ctx.guild.id]['Previous']) + 1} | {queue_sum}]\n"
-                                      f"⮚ Volume: {int(PLAYER_MOD[ctx.guild.id]['Volume'] * 100)}% | "
-                                      f"Filter: {PLAYER_MOD[ctx.guild.id]['Filter']['Name']} "
-                                      f"[{PLAYER_MOD[ctx.guild.id]['Filter']['Intensity']}%] | "
-                                      f"Loop: {PLAYER_MOD[ctx.guild.id]['Loop']}")
+                embed.set_footer(text=strings["Music.NowPlaying"].format(
+                    PLAYER_INFO[ctx.guild.id]["Title"], PLAY_TIMER[ctx.guild.id]["Act"],
+                    PLAYER_INFO[ctx.guild.id]["Object"].formatted_duration, len(QUEUE[ctx.guild.id]["Previous"]) + 1,
+                    queue_sum, int(PLAYER_MOD[ctx.guild.id]["Volume"] * 100),
+                    PLAYER_MOD[ctx.guild.id]["Filter"]["Name"], PLAYER_MOD[ctx.guild.id]["Filter"]["Intensity"],
+                    PLAYER_MOD[ctx.guild.id]["Loop"]))
             await ctx.send(embed=embed)
         else:
             embed = discord.Embed(
-                description=f"Successfully fetched **{len(positional_queue['List'])}** out of"
-                            f" **{abs(from_ - to) + 1}** songs [**{from_}-{to}**]",
-                color=discord.Color.dark_gold(),
+                description=strings["Music.FetchingSongsSuccess"].format(
+                    len(positional_queue["List"]), abs(from_ - to) + 1, from_, to),
+                color=discord.Color.dark_gold()
             )
             await ctx.edit(embed=embed)
 
             additional_songs = len(QUEUE[ctx.guild.id]["Current"]) - (len(positional_queue["List"]) + 1)
-            additional_song_message = f"+ {additional_songs} more...\n"
             total_duration = None
 
             if all(isinstance(song, YTDLSource) for song in QUEUE[ctx.guild.id]["Current"][1:]):
@@ -1260,22 +1263,19 @@ class Music(commands.Cog):
                                                      for song in QUEUE[ctx.guild.id]["Current"][1:]))
 
             embed = discord.Embed(
-                description=f"**In queue:**\n"
-                            f"{positional_queue['Formatted']}\n"
-                            f"{additional_song_message if additional_songs else ''}\n"
-                            f"**In total:** **{len(QUEUE[ctx.guild.id]['Current']) - 1}** song(s)"
-                            f"{f' [**{total_duration}**]' if total_duration else ''}",
-                color=discord.Color.dark_gold(),
+                description=strings["Music.TotalInQueue"].format(
+                    positional_queue["Formatted"],
+                    strings["Music.Additional"].format(additional_songs) if additional_songs else "",
+                    len(QUEUE[ctx.guild.id]["Current"]) - 1, f" [**{total_duration}**]" if total_duration else ""),
+                color=discord.Color.dark_gold()
             )
             if ctx.voice_client and PLAY_TIMER[ctx.guild.id]["Act"] != "":
-                embed.set_footer(text=f"⮚ Now playing: {PLAYER_INFO[ctx.guild.id]['Title']} "
-                                      f"[{PLAY_TIMER[ctx.guild.id]['Act']} | "
-                                      f"{PLAYER_INFO[ctx.guild.id]['Object'].formatted_duration}] "
-                                      f"[{len(QUEUE[ctx.guild.id]['Previous']) + 1} | {queue_sum}]\n"
-                                      f"⮚ Volume: {int(PLAYER_MOD[ctx.guild.id]['Volume'] * 100)}% | "
-                                      f"Filter: {PLAYER_MOD[ctx.guild.id]['Filter']['Name']} "
-                                      f"[{PLAYER_MOD[ctx.guild.id]['Filter']['Intensity']}%] | "
-                                      f"Loop: {PLAYER_MOD[ctx.guild.id]['Loop']}")
+                embed.set_footer(text=strings["Music.NowPlaying"].format(
+                    PLAYER_INFO[ctx.guild.id]["Title"], PLAY_TIMER[ctx.guild.id]["Act"],
+                    PLAYER_INFO[ctx.guild.id]["Object"].formatted_duration, len(QUEUE[ctx.guild.id]["Previous"]) + 1,
+                    queue_sum, int(PLAYER_MOD[ctx.guild.id]["Volume"] * 100),
+                    PLAYER_MOD[ctx.guild.id]["Filter"]["Name"], PLAYER_MOD[ctx.guild.id]["Filter"]["Intensity"],
+                    PLAYER_MOD[ctx.guild.id]["Loop"]))
             await ctx.send(embed=embed)
 
     @commands.slash_command(description="Shuffles the queue")
@@ -1284,9 +1284,11 @@ class Music(commands.Cog):
     async def shuffle(self, ctx, from_: int = 1, to: int = None):
         await ctx.defer()
 
+        strings = await get_language_strings(ctx)
+
         if len(QUEUE[ctx.guild.id]["Current"]) - 1 < 1:
             embed = discord.Embed(
-                description="**Error:** Queue is empty.",
+                description=strings["Errors.QueueEmpty"],
                 color=discord.Color.red(),
             )
             await ctx.respond(embed=embed)
@@ -1309,8 +1311,8 @@ class Music(commands.Cog):
                                                                           loop=self.bot.loop, stream=True)
 
         embed = discord.Embed(
-            description=f"**⤮ Shuffled {abs(from_ - to)}** songs in queue [**{from_}-{to - 1}**]\n"
-                        f"**Next in queue:** {QUEUE[ctx.guild.id]['Current'][1].title}",
+            description=strings["Music.Shuffle"].format(
+                abs(from_ - to), from_, to - 1, QUEUE[ctx.guild.id]["Current"][1].title),
             color=discord.Color.purple(),
         )
         await ctx.respond(embed=embed)
@@ -1322,9 +1324,11 @@ class Music(commands.Cog):
     async def move(self, ctx, from_: int, to: int, replace: bool = False):
         await ctx.defer()
 
+        strings = await get_language_strings(ctx)
+
         if len(QUEUE[ctx.guild.id]["Current"]) - 1 < 1:
             embed = discord.Embed(
-                description="**Error:** Queue is empty.",
+                description=strings["Errors.QueueEmpty"],
                 color=discord.Color.red(),
             )
             await ctx.respond(embed=embed)
@@ -1354,9 +1358,8 @@ class Music(commands.Cog):
                                                                               loop=self.bot.loop, stream=True)
 
             embed = discord.Embed(
-                description=f"**⇄ Moved song:** {from_player.title} [**{from_}**] **→** [**{to}**]\n"
-                            f"**⊝ Replaced song:** {to_player.title}\n"
-                            f"**Next in queue:** {QUEUE[ctx.guild.id]['Current'][1].title}",
+                description=strings["Music.MoveReplace"].format(
+                    from_player.title, from_, to, to_player.title, QUEUE[ctx.guild.id]["Current"][1].title),
                 color=discord.Color.purple(),
             )
             await ctx.respond(embed=embed)
@@ -1370,8 +1373,8 @@ class Music(commands.Cog):
                                                                           loop=self.bot.loop, stream=True)
 
         embed = discord.Embed(
-            description=f"**⇄ Moved song:** {from_player.title} [**{from_}**] **→** [**{to}**]\n"
-                        f"**Next in queue:** {QUEUE[ctx.guild.id]['Current'][1].title}",
+            description=strings["Music.Move"].format(
+                from_player.title, from_, to, QUEUE[ctx.guild.id]["Current"][1].title),
             color=discord.Color.purple(),
         )
         await ctx.respond(embed=embed)
@@ -1384,30 +1387,41 @@ class Music(commands.Cog):
         except (discord.ApplicationCommandInvokeError, discord.InteractionResponded):
             pass
 
+        strings = await get_language_strings(ctx)
+
         if not ctx.voice_client or (not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused()):
             embed = discord.Embed(
-                description=f"**Error:** Nothing is currently playing.",
+                description=strings["Errors.NothingPlaying"],
                 color=discord.Color.red(),
             )
             if PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]:
-                embed.set_footer(text=f"Requested via a button [{PLAYER_INFO[ctx.guild.id]['ButtonInvoke']}]")
+                embed.set_footer(text=strings["Music.ButtonRequest"].format(PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]))
                 await ctx.send(embed=embed)
             else:
                 await ctx.respond(embed=embed)
             return
 
-        PLAYER_MOD[ctx.guild.id]["Loop"] = "Disabled"
+        if PLAYER_MOD[ctx.guild.id]["Loop"] == "Single" or (PLAYER_MOD[ctx.guild.id]["Loop"] == "Queue" and
+                                                            len(QUEUE[ctx.guild.id]["Current"]) - 1 < 1):
+            PLAYER_MOD[ctx.guild.id]["Loop"] = "Disabled"
+        PLAYER_INFO[ctx.guild.id]["PauseMsg"] = None
+        PLAYER_INFO[ctx.guild.id]["VolMsg"] = None
+        PLAYER_INFO[ctx.guild.id]["RmvMsg"] = None
+        PLAYER_INFO[ctx.guild.id]["LoopMsg"] = None
+        PLAYER_INFO[ctx.guild.id]["Removed"].clear()
+        PLAYER_INFO[ctx.guild.id]["First"] = False
+
         to = min(max(to, 1), len(QUEUE[ctx.guild.id]["Current"]) - 1)
 
         if to <= 1 or len(QUEUE[ctx.guild.id]["Current"]) - 1 < 1:
             ctx.voice_client.stop()
 
             embed = discord.Embed(
-                description=f"**↷ Skipping current song:** {PLAYER_INFO[ctx.guild.id]['Title']}",
+                description=strings["Music.Skip"].format(PLAYER_INFO[ctx.guild.id]["Title"]),
                 color=discord.Color.blurple()
             )
             if PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]:
-                embed.set_footer(text=f"Requested via a button [{PLAYER_INFO[ctx.guild.id]['ButtonInvoke']}]")
+                embed.set_footer(text=strings["Music.ButtonRequest"].format(PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]))
                 await ctx.send(embed=embed)
             else:
                 await ctx.respond(embed=embed)
@@ -1432,8 +1446,7 @@ class Music(commands.Cog):
             ctx.voice_client.stop()
 
             embed = discord.Embed(
-                description=f"**↷ Skipping current** + **{to - 1}** songs in queue [**1-{to - 1}**]\n"
-                            f"**Next in queue:** {next_player.title}",
+                description=strings["Music.SkipRange"].format(to - 1, to - 1, next_player.title),
                 color=discord.Color.blurple()
             )
             await ctx.respond(embed=embed)
@@ -1446,9 +1459,11 @@ class Music(commands.Cog):
     async def disconnect(self, ctx, after_song: bool = False):
         await ctx.defer()
 
+        strings = await get_language_strings(ctx)
+
         if not ctx.voice_client or not ctx.voice_client.is_connected():
             embed = discord.Embed(
-                description="**Error:** Not connected to a voice channel.",
+                description=strings["Errors.NotConnected"],
                 color=discord.Color.red(),
             )
             await ctx.respond(embed=embed)
@@ -1458,9 +1473,9 @@ class Music(commands.Cog):
 
         if after_song and ctx.voice_client.is_playing():
             embed = discord.Embed(
-                description=f"**Disconnecting after current song:** {PLAYER_INFO[ctx.guild.id]['Title']} "
-                            f"[**{PLAY_TIMER[ctx.guild.id]['Act']}** | "
-                            f"**{PLAYER_INFO[ctx.guild.id]['Object'].formatted_duration}**]",
+                description=strings["Music.DisconnectAfterSong"].format(
+                    PLAYER_INFO[ctx.guild.id]["Title"], PLAY_TIMER[ctx.guild.id]["Act"],
+                    PLAYER_INFO[ctx.guild.id]["Object"].formatted_duration),
                 color=discord.Color.dark_red()
             )
             await ctx.respond(embed=embed)
@@ -1479,7 +1494,7 @@ class Music(commands.Cog):
             return
 
         embed = discord.Embed(
-            description=f"**Disconnecting from current voice channel:** {channel}",
+            description=strings["Music.Disconnect"].format(channel),
             color=discord.Color.dark_red()
         )
         await ctx.respond(embed=embed)
@@ -1493,9 +1508,11 @@ class Music(commands.Cog):
         except (discord.ApplicationCommandInvokeError, discord.InteractionResponded):
             pass
 
+        strings = await get_language_strings(ctx)
+
         if not mode:
             embed = discord.Embed(
-                description=f"**⟳ Loop mode is currently:** {PLAYER_MOD[ctx.guild.id]['Loop']}",
+                description=strings["Music.Loop"].format(PLAYER_MOD[ctx.guild.id]["Loop"]),
                 color=discord.Color.dark_gold(),
             )
             await ctx.respond(embed=embed)
@@ -1504,11 +1521,11 @@ class Music(commands.Cog):
         PLAYER_MOD[ctx.guild.id]["Loop"] = mode
 
         embed = discord.Embed(
-            description=f"**⟳ Loop mode is now:** {PLAYER_MOD[ctx.guild.id]['Loop']}",
+            description=strings["Music.LoopNew"].format(PLAYER_MOD[ctx.guild.id]["Loop"]),
             color=discord.Color.blurple(),
         )
         if PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]:
-            embed.set_footer(text=f"Requested via a button [{PLAYER_INFO[ctx.guild.id]['ButtonInvoke']}]")
+            embed.set_footer(text=strings["Music.ButtonRequest"].format(PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]))
             if PLAYER_INFO[ctx.guild.id]["LoopMsg"]:
                 await PLAYER_INFO[ctx.guild.id]["LoopMsg"].edit(embed=embed)
             else:
@@ -1523,24 +1540,26 @@ class Music(commands.Cog):
         except (discord.ApplicationCommandInvokeError, discord.InteractionResponded):
             pass
 
+        strings = await get_language_strings(ctx)
+
         if not ctx.voice_client or (not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused()):
             embed = discord.Embed(
-                description=f"**Error:** Nothing is currently playing.",
+                description=strings["Errors.NothingPlaying"],
                 color=discord.Color.red(),
             )
             if PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]:
-                embed.set_footer(text=f"Requested via a button [{PLAYER_INFO[ctx.guild.id]['ButtonInvoke']}]")
+                embed.set_footer(text=strings["Music.ButtonRequest"].format(PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]))
                 await ctx.send(embed=embed)
             else:
                 await ctx.respond(embed=embed)
             return
         elif ctx.voice_client.is_playing():
             embed = discord.Embed(
-                description=f"**❚❚ Pausing current song:** {PLAYER_INFO[ctx.guild.id]['Title']}",
+                description=strings["Music.Pause"].format(PLAYER_INFO[ctx.guild.id]["Title"]),
                 color=discord.Color.blurple(),
             )
             if PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]:
-                embed.set_footer(text=f"Requested via a button [{PLAYER_INFO[ctx.guild.id]['ButtonInvoke']}]")
+                embed.set_footer(text=strings["Music.ButtonRequest"].format(PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]))
                 if PLAYER_INFO[ctx.guild.id]["PauseMsg"]:
                     await PLAYER_INFO[ctx.guild.id]["PauseMsg"].edit(embed=embed)
                 else:
@@ -1551,11 +1570,11 @@ class Music(commands.Cog):
             ctx.voice_client.pause()
         else:
             embed = discord.Embed(
-                description=f"**⯈ Resuming current song:** {PLAYER_INFO[ctx.guild.id]['Title']}",
+                description=strings["Music.Resume"].format(PLAYER_INFO[ctx.guild.id]["Title"]),
                 color=discord.Color.blurple(),
             )
             if PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]:
-                embed.set_footer(text=f"Requested via a button [{PLAYER_INFO[ctx.guild.id]['ButtonInvoke']}]")
+                embed.set_footer(text=strings["Music.ButtonRequest"].format(PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]))
                 if PLAYER_INFO[ctx.guild.id]["PauseMsg"]:
                     await PLAYER_INFO[ctx.guild.id]["PauseMsg"].edit(embed=embed)
                 else:
@@ -1572,13 +1591,15 @@ class Music(commands.Cog):
     async def filter_(self, ctx, mode: str, intensity: int = None):
         await ctx.defer()
 
+        strings = await get_language_strings(ctx)
+
         if intensity:
             intensity = min(max(intensity, 0), 100)
 
         if not mode and not intensity:
             embed = discord.Embed(
-                description=f"**⎘ Filter mode is currently:** {PLAYER_MOD[ctx.guild.id]['Filter']['Name']} "
-                            f"[Intensity **{PLAYER_MOD[ctx.guild.id]['Filter']['Intensity']} %**]",
+                description=strings["Music.Filter"].format(
+                    PLAYER_MOD[ctx.guild.id]["Filter"]["Name"], PLAYER_MOD[ctx.guild.id]["Filter"]["Intensity"]),
                 color=discord.Color.dark_gold(),
             )
             await ctx.respond(embed=embed)
@@ -1628,9 +1649,8 @@ class Music(commands.Cog):
                 PLAYER_MOD[ctx.guild.id]["Filter"] = {"Name": "Disabled", "Val": "", "Intensity": intensity}
 
         embed = discord.Embed(
-            description=f"**⎘ Applying filter mode:** {PLAYER_MOD[ctx.guild.id]['Filter']['Name']} "
-                        f"[Intensity **{PLAYER_MOD[ctx.guild.id]['Filter']['Intensity']}%**]\n"
-                        f"This will take **a moment**...",
+            description=strings["Music.FilterApplying"].format(
+                PLAYER_MOD[ctx.guild.id]["Filter"]["Name"], PLAYER_MOD[ctx.guild.id]["Filter"]["Intensity"]),
             color=discord.Color.blurple(),
         )
         main = await ctx.respond(embed=embed)
@@ -1660,8 +1680,8 @@ class Music(commands.Cog):
                     continue
 
         embed = discord.Embed(
-            description=f"**⎘ Filter mode is now:** {PLAYER_MOD[ctx.guild.id]['Filter']['Name']} "
-                        f"[Intensity **{PLAYER_MOD[ctx.guild.id]['Filter']['Intensity']}%**]",
+            description=strings["Music.FilterNew"].format(
+                PLAYER_MOD[ctx.guild.id]["Filter"]["Name"], PLAYER_MOD[ctx.guild.id]["Filter"]["Intensity"]),
             color=discord.Color.blurple(),
         )
         await main.edit(embed=embed)
@@ -1676,9 +1696,11 @@ class Music(commands.Cog):
         except (discord.ApplicationCommandInvokeError, discord.InteractionResponded):
             pass
 
+        strings = await get_language_strings(ctx)
+
         if level is None:
             embed = discord.Embed(
-                description=f"**🕪 Volume level is currently:** {int(PLAYER_MOD[ctx.guild.id]['Volume'] * 100)} %",
+                description=strings["Music.Volume"].format(int(PLAYER_MOD[ctx.guild.id]["Volume"] * 100)),
                 color=discord.Color.dark_gold(),
             )
             await ctx.respond(embed=embed)
@@ -1690,11 +1712,11 @@ class Music(commands.Cog):
             PLAYER_INFO[ctx.guild.id]["Object"].volume = PLAYER_MOD[ctx.guild.id]["Volume"]
 
         embed = discord.Embed(
-            description=f"**🕪 Volume level is now:** {int(PLAYER_MOD[ctx.guild.id]['Volume'] * 100)} %",
+            description=strings["Music.VolumeNew"].format(int(PLAYER_MOD[ctx.guild.id]["Volume"] * 100)),
             color=discord.Color.blurple(),
         )
         if PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]:
-            embed.set_footer(text=f"Requested via a button [{PLAYER_INFO[ctx.guild.id]['ButtonInvoke']}]")
+            embed.set_footer(text=strings["Music.ButtonRequest"].format(PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]))
             if PLAYER_INFO[ctx.guild.id]["VolMsg"]:
                 await PLAYER_INFO[ctx.guild.id]["VolMsg"].edit(embed=embed)
             else:
@@ -1710,13 +1732,15 @@ class Music(commands.Cog):
         except (discord.ApplicationCommandInvokeError, discord.InteractionResponded):
             pass
 
+        strings = await get_language_strings(ctx)
+
         if not len(QUEUE[ctx.guild.id]["Previous"]):
             embed = discord.Embed(
-                description="**Error:** No recent songs associated with this queue.",
+                description=strings["Errors.NoRecent"],
                 color=discord.Color.red(),
             )
             if PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]:
-                embed.set_footer(text=f"Requested via a button [{PLAYER_INFO[ctx.guild.id]['ButtonInvoke']}]")
+                embed.set_footer(text=strings["Music.ButtonRequest"].format(PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]))
                 await ctx.send(embed=embed)
             else:
                 await ctx.respond(embed=embed)
@@ -1738,10 +1762,10 @@ class Music(commands.Cog):
             ctx.voice_client.stop()
 
             embed = discord.Embed(
-                description=f"**↶ Backing to previous song:** {replayed_player.title}",
+                description=strings["Music.Back"].format(replayed_player.title),
                 color=discord.Color.blurple()
             )
-            embed.set_footer(text=f"Requested via a button [{PLAYER_INFO[ctx.guild.id]['ButtonInvoke']}]")
+            embed.set_footer(text=strings["Music.ButtonRequest"].format(PLAYER_INFO[ctx.guild.id]["ButtonInvoke"]))
             await ctx.send(embed=embed)
 
             PLAY_TIMER[ctx.guild.id]["Raw"], PLAY_TIMER[ctx.guild.id]["Act"] = 0, ""
@@ -1754,8 +1778,7 @@ class Music(commands.Cog):
 
         if not ctx.voice_client.is_playing() and not QUEUE[ctx.guild.id]["Current"]:
             embed = discord.Embed(
-                description=f"**⭟ Replaying song:** {replayed_player.title} [**1**]\n"
-                            f"**Note:** No further songs in queue.",
+                description=strings["Music.ReplayLast"].format(replayed_player.title),
                 color=discord.Color.purple(),
             )
             await ctx.respond(embed=embed)
@@ -1769,8 +1792,8 @@ class Music(commands.Cog):
                                                                               loop=self.bot.loop, stream=True)
 
             embed = discord.Embed(
-                description=f"**⭟ Replaying song:** {replayed_player.title} [**{insert}**]\n"
-                            f"**Next in queue:** {QUEUE[ctx.guild.id]['Current'][1].title}",
+                description=strings["Music.Replay"].format(
+                    replayed_player.title, insert, QUEUE[ctx.guild.id]["Current"][1].title),
                 color=discord.Color.purple(),
             )
             await ctx.respond(embed=embed)
@@ -1780,16 +1803,18 @@ class Music(commands.Cog):
     async def seek(self, ctx, timestamp: str):
         await ctx.defer()
 
+        strings = await get_language_strings(ctx)
+
         if not ctx.voice_client or (not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused()):
             embed = discord.Embed(
-                description=f"**Error:** Nothing is currently playing.",
+                description=strings["Errors.NothingPlaying"],
                 color=discord.Color.red(),
             )
             await ctx.respond(embed=embed)
             return
         elif PLAYER_INFO[ctx.guild.id]["Object"].formatted_duration == "Live":
             embed = discord.Embed(
-                description=f"**Error:** Cannot use `seek` on live streams.",
+                description=strings["Errors.SeekLive"],
                 color=discord.Color.red(),
             )
             await ctx.respond(embed=embed)
@@ -1809,9 +1834,7 @@ class Music(commands.Cog):
         sought = format_duration(new_timer_value, PLAYER_INFO[ctx.guild.id]["DurationSec"])
 
         embed = discord.Embed(
-            description=f"**⌕ Seeking timestamp:** {sought} | "
-                        f"{PLAYER_INFO[ctx.guild.id]['Object'].formatted_duration}\n"
-                        f"This will take **a moment**...",
+            description=strings["Music.Seek"].format(sought, PLAYER_INFO[ctx.guild.id]["Object"].formatted_duration),
             color=discord.Color.blurple(),
         )
         main = await ctx.respond(embed=embed)
@@ -1833,7 +1856,8 @@ class Music(commands.Cog):
             sought = PLAYER_INFO[ctx.guild.id]["Object"].formatted_duration
 
         embed = discord.Embed(
-            description=f"**⌕ Sought timestamp:** {sought} | {PLAYER_INFO[ctx.guild.id]['Object'].formatted_duration}",
+            description=strings["Music.SeekSuccess"].format(
+                sought, PLAYER_INFO[ctx.guild.id]["Object"].formatted_duration),
             color=discord.Color.blurple(),
         )
         await main.edit(embed=embed)
@@ -1845,19 +1869,20 @@ class Music(commands.Cog):
     async def lyrics(self, ctx, title: str = None):
         await ctx.defer()
 
+        strings = await get_language_strings(ctx)
+
         if not title and (not ctx.voice_client or (ctx.voice_client and not ctx.voice_client.is_playing())):
             embed = discord.Embed(
-                description="**Error:** Nothing is currently playing.",
+                description=strings["Errors.NothingPlaying"],
                 color=discord.Color.red(),
             )
             await ctx.respond(embed=embed)
             return
         elif not title:
-            title = PLAYER_INFO[ctx.guild.id]['Title']
+            title = PLAYER_INFO[ctx.guild.id]["Title"]
 
         embed = discord.Embed(
-            description=f"Fetching lyrics for `{title}`\n"
-                        f"This will take **a moment**...",
+            description=strings["Music.FetchingLyrics"].format(title),
             color=discord.Color.dark_gold(),
         )
         main = await ctx.respond(embed=embed)
@@ -1866,12 +1891,12 @@ class Music(commands.Cog):
         stack = []
 
         for index, char in enumerate(title):
-            if char in ('(', '['):
+            if char in ("(", "["):
                 stack.append((index, char))
-            elif char in (')', ']') and stack:
+            elif char in (")", "]") and stack:
                 opening_index, opening_char = stack.pop()
-                if (opening_char == '(' and char == ')') or (opening_char == '[' and char == ']'):
-                    title_list[opening_index:index + 1] = [''] * (index - opening_index + 1)
+                if (opening_char == "(" and char == ")") or (opening_char == "[" and char == "]"):
+                    title_list[opening_index:index + 1] = [""] * (index - opening_index + 1)
 
         proper_title = "".join(title_list)
 
@@ -1879,7 +1904,7 @@ class Music(commands.Cog):
             song = Constants.GENIUS.search_song(title=proper_title, get_full_info=False)
         except (requests.ReadTimeout, requests.Timeout, discord.ApplicationCommandInvokeError):
             embed = discord.Embed(
-                description="**Error:** Request timed out, please try again.",
+                description=strings["Errors.TimedOut"],
                 color=discord.Color.red(),
             )
             await main.edit(embed=embed)
@@ -1887,7 +1912,7 @@ class Music(commands.Cog):
 
         if not song:
             embed = discord.Embed(
-                description=f"No lyrics found for `{title}`",
+                description=strings["Music.FetchingLyricsNotFound"].format(title),
                 color=discord.Color.dark_gold(),
             )
             await main.edit(embed=embed)
@@ -1917,22 +1942,20 @@ class Music(commands.Cog):
         proper_lyrics = "\n".join(split_lyrics)
 
         embed = discord.Embed(
-            description=f"Successfully fetched lyrics for `{title}`",
+            description=strings["Music.FetchingLyricsSuccess"].format(title),
             color=discord.Color.dark_gold(),
         )
         await main.edit(embed=embed)
 
         try:
             embed = discord.Embed(
-                description=f"**{song.title} Lyrics**\n"
-                            f"{proper_lyrics}",
+                description=strings["Music.Lyrics"].format(song.title, proper_lyrics),
                 color=discord.Color.dark_gold()
             )
             await ctx.send(embed=embed)
         except discord.HTTPException:
             embed = discord.Embed(
-                description=f"**{song.title} Lyrics**\n\n"
-                            f"Lyrics too long for Discord. [Find them here.]({song.url})",
+                description=strings["Music.LyricsTooLong"].format(song.title, song.url),
                 color=discord.Color.dark_gold()
             )
             await ctx.send(embed=embed)

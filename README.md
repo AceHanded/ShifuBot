@@ -15,6 +15,18 @@ ShifuBot has come a long way in the few years that it has been in development, a
 ## Changelog
 
 <details>
+    <summary>v1.0.2</summary>
+    
+    - Added support for custom languages.
+    
+    - Added a `settings.json` file for modifying guild specific settings.
+      * Also added a `settings` command for changing the language.
+
+    - Improved the `loop` command's `queue` mode.
+
+    - The `pause` and `loop` buttons of the `play` command now change color based on their state.
+</details>
+<details>
     <summary>v1.0.1</summary>
     
     - Added a `loop` button to the `play` command's main embed, which cycles between the different loop-modes.

@@ -7,7 +7,7 @@ from datetime import datetime
 import json
 from dotenv import load_dotenv
 import os
-from Cogs.utils import Color
+from Cogs.utils import Color, get_language_strings
 
 
 load_dotenv()
@@ -22,55 +22,57 @@ for cog in cogs:
 
 
 @bot.slash_command(description="Loads the specified cog", guild_ids=[os.getenv("PERSONAL_GUILD")])
-@option("extension", description="The extension to handle", required=True, choices=cogs)
+@option(name="extension", description="The extension to handle", required=True, choices=cogs)
 @commands.is_owner()
 async def load(ctx, extension: str):
-    await ctx.defer()
+    strings = await get_language_strings(ctx)
 
     bot.load_extension(f"Cogs.{extension}")
 
     embed = discord.Embed(
-        description=f"Cog `{extension}` loaded successfully.",
+        description=strings["Main.LoadCog"].format(extension),
         color=discord.Color.dark_green()
     )
-    await ctx.followup.send(embed=embed)
+    await ctx.response.send_message(embed=embed)
 
 
 @bot.slash_command(description="Unloads the specified cog", guild_ids=[os.getenv("PERSONAL_GUILD")])
-@option("extension", description="The extension to handle", required=True, choices=cogs)
+@option(name="extension", description="The extension to handle", required=True, choices=cogs)
 @commands.is_owner()
 async def unload(ctx, extension: str):
-    await ctx.defer()
+    strings = await get_language_strings(ctx)
 
     bot.unload_extension(f"Cogs.{extension}")
 
     embed = discord.Embed(
-        description=f"Cog `{extension}` unloaded successfully.",
+        description=strings["Main.UnloadCog"].format(extension),
         color=discord.Color.dark_green()
     )
-    await ctx.followup.send(embed=embed)
+    await ctx.response.send_message(embed=embed)
 
 
 @bot.slash_command(description="Reloads the specified cog", guild_ids=[os.getenv("PERSONAL_GUILD")])
-@option("extension", description="The extension to handle", required=True, choices=cogs)
+@option(name="extension", description="The extension to handle", required=True, choices=cogs)
 @commands.is_owner()
 async def reload(ctx, extension: str):
-    await ctx.defer()
+    strings = await get_language_strings(ctx)
 
     bot.reload_extension(f"Cogs.{extension}")
 
     embed = discord.Embed(
-        description=f"Cog `{extension}` reloaded successfully.",
+        description=strings["Main.ReloadCog"].format(extension),
         color=discord.Color.dark_green()
     )
-    await ctx.followup.send(embed=embed)
+    await ctx.response.send_message(embed=embed)
 
 
 @bot.event
 async def on_message(msg):
     if msg.content == bot.user.mention:
+        strings = await get_language_strings(msg)
+
         embed = discord.Embed(
-            description="Use the command `/help` to get started.",
+            description=strings["Main.Mention"],
             color=discord.Color.dark_gold(),
         )
         await msg.channel.send(embed=embed)
@@ -99,10 +101,16 @@ async def on_ready():
     with open("Data/messages.json", "r") as message_file:
         messages = json.load(message_file)
 
+    with open("Data/settings.json", "r") as settings_file:
+        settings = json.load(settings_file)
+
     valid_message_guilds, invalid_message_guilds = [], []
     for guild_id in messages:
         try:
-            select = Select(placeholder="Waiting for role selection...", options=[], min_values=0)
+            with open(f"Locales/{settings.get(str(guild_id), 'english')}.json") as lang_file:
+                strings = json.load(lang_file)
+
+            select = Select(placeholder=strings["RoleSelection.Placeholder"], options=[], min_values=0)
 
             running_number = 1
             for role in messages[guild_id]["Opts"]:
@@ -138,9 +146,9 @@ async def on_ready():
                     joined_unassigned = "\n".join(unassigned_roles)
 
                     if assigned_roles or removed_roles or unassigned_roles:
-                        roles_assigned_message = "You have **assigned** the following roles to yourself:\n"
-                        roles_removed_message = "You have **removed** the following roles from yourself:\n"
-                        roles_unassigned_message = "These roles could not be accessed due to permission issues:\n"
+                        roles_assigned_message = strings["RoleSelection.Assigned"]
+                        roles_removed_message = strings["RoleSelection.Removed"]
+                        roles_unassigned_message = strings["RoleSelection.Unassigned"]
 
                         embed_ = discord.Embed(
                             description=f"{roles_assigned_message + joined_assigned if assigned_roles else ''}"
@@ -150,7 +158,7 @@ async def on_ready():
                         )
                     else:
                         embed_ = discord.Embed(
-                            description=f"No changes made to roles.",
+                            description=strings["RoleSelection.NoChanges"],
                             color=discord.Color.dark_green()
                         )
                     await interaction.response.send_message(embed=embed_, ephemeral=True)
@@ -195,6 +203,8 @@ async def on_ready():
 async def perfstat(ctx):
     from Cogs.music import QUEUE
 
+    strings = await get_language_strings(ctx)
+
     ram = psutil.virtual_memory()[3] / 1000000000
     ramt = psutil.virtual_memory().total / 1000000000
     ramp = round(ram / ramt, 3) * 100
@@ -202,14 +212,10 @@ async def perfstat(ctx):
     current_time = datetime.now().strftime('%H:%M:%S')
 
     embed = discord.Embed(
-        description=f"I'm currently in **{len(bot.guilds)}** guild(s)\n"
-                    f"...and connected to **{len(QUEUE)}** of them.\n\n"
-                    f"**RAM:** {ram:.4f} ({ramp:.1f}) / {ramt:.4f} GB "
-                    f"(100.0 %)\n"
-                    f"**CPU:** {cpu} / 100.0 %",
+        description=strings["Main.Perfstat"].format(len(bot.guilds), len(QUEUE), ram, ramp, ramt, cpu),
         color=discord.Color.dark_gold()
     )
-    embed.set_footer(text=f"Requested at: {current_time}")
+    embed.set_footer(text=strings["Main.RequestTimestamp"].format(current_time))
     await ctx.response.send_message(embed=embed, ephemeral=True)
 
 

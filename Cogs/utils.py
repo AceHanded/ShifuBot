@@ -7,6 +7,7 @@ from spotipy.oauth2 import SpotifyOAuth
 import lyricsgenius
 import sclib
 from dotenv import load_dotenv
+import json
 import os
 
 
@@ -60,7 +61,27 @@ class Constants:
     CARD_SUIT = {"Clubs": "♧", "Diamonds": "♢", "Hearts": "♡", "Spades": "♤"}
 
 
+async def get_language_strings(ctx):
+    with open("Data/settings.json", "r") as settings_file:
+        settings = json.load(settings_file)
+
+    try:
+        with open(f"Locales/{settings.get(str(ctx.guild.id), 'english')}.json") as lang_file:
+            strings = json.load(lang_file)
+    except FileNotFoundError:
+        embed = discord.Embed(
+            description=f"**Error:** Language files not detected. Have they been deleted?",
+            color=discord.Color.red(),
+        )
+        await ctx.respond(embed=embed)
+        return
+
+    return strings
+
+
 async def parse_timestamp(ctx, timestamp: str, no_seek: bool = False):
+    strings = await get_language_strings(ctx)
+
     colon_count = timestamp.count(":")
 
     if colon_count == 2:
@@ -72,9 +93,9 @@ async def parse_timestamp(ctx, timestamp: str, no_seek: bool = False):
         hours, minutes, seconds = "00", "00", timestamp
     else:
         embed = discord.Embed(
-            description=f"**Note:** Invalid timestamp format (hours:minutes:seconds)."
-                        f"{' Defaulting to 00:00.' if not no_seek else ''}",
-            color=discord.Color.red(),
+            description=strings["Notes.InvalidTimestamp"].format(
+                strings["Utils.DefaultingTimestamp"] if not no_seek else ""),
+            color=discord.Color.blue(),
         )
         await ctx.respond(embed=embed)
 
@@ -84,9 +105,9 @@ async def parse_timestamp(ctx, timestamp: str, no_seek: bool = False):
 
     if not (hours.isdigit() and minutes.isdigit() and seconds.isdigit()):
         embed = discord.Embed(
-            description=f"**Note:** Invalid timestamp format (hours:minutes:seconds)."
-                        f"{' Defaulting to 00:00.' if not no_seek else ''}",
-            color=discord.Color.red(),
+            description=strings["Notes.InvalidTimestamp"].format(
+                strings["Utils.DefaultingTimestamp"] if not no_seek else ""),
+            color=discord.Color.blue(),
         )
         await ctx.respond(embed=embed)
 
@@ -117,11 +138,13 @@ def format_duration(seconds: int, compare_to: int = None, use_milliseconds: bool
 
 
 async def connect_handling(ctx, play_command=False):
+    strings = await get_language_strings(ctx)
+
     try:
         channel = ctx.author.voice.channel
     except AttributeError:
         embed = discord.Embed(
-            description="**Note:** Please connect to a voice channel first.",
+            description=strings["Notes.ConnectToChannel"],
             color=discord.Color.blue(),
         )
         await ctx.followup.send(embed=embed)
@@ -129,7 +152,7 @@ async def connect_handling(ctx, play_command=False):
 
     if ctx.voice_client is None:
         embed = discord.Embed(
-            description=f"**Connecting to voice channel:** <#{channel.id}>",
+            description=strings["Utils.Connecting"].format(channel.id),
             color=discord.Color.dark_green()
         )
         await ctx.followup.send(embed=embed)
@@ -138,7 +161,7 @@ async def connect_handling(ctx, play_command=False):
         await ctx.guild.change_voice_state(channel=channel, self_mute=False, self_deaf=True)
     elif channel != ctx.voice_client.channel:
         embed = discord.Embed(
-            description=f"**Moving to voice channel:** <#{channel.id}>",
+            description=strings["Utils.Moving"].format(channel.id),
             color=discord.Color.dark_green()
         )
         await ctx.followup.send(embed=embed)
@@ -147,7 +170,7 @@ async def connect_handling(ctx, play_command=False):
         await ctx.guild.change_voice_state(channel=channel, self_mute=False, self_deaf=True)
     elif ctx.voice_client and channel == ctx.voice_client.channel and not play_command:
         embed = discord.Embed(
-            description=f"**Error:** Already connected to voice channel: `{channel}`",
+            description=strings["Errors.AlreadyConnected"].format(channel),
             color=discord.Color.red()
         )
         await ctx.followup.send(embed=embed)

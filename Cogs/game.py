@@ -5,16 +5,11 @@ from discord.ext import commands
 import random
 import asyncio
 import json
-from Cogs.utils import Constants
+from Cogs.utils import Constants, get_language_strings
 
 
 BRAWL = {}
 BLACKJACK = {}
-
-SCENES = ["Backyard brawl", "Backstreet brawl", "Saloon brawl", "Pizzeria brawl", "Playground brawl", "Grill brawl"]
-ATTACK_MEANS = ["a baseball bat", "a crowbar", "their bare fists", "a knife", "a car",
-                "an explosive christmas ornament", "a rock", "their mom", "a T-34", "a concealed shiv", "God's hand"]
-ATTACK_SPOT = ["back", "knee", "phallus", "head", "face", "neck", "arm", "chest", "ear", "nose", "toe", "buttock"]
 
 
 class Game(commands.Cog):
@@ -26,6 +21,12 @@ class Game(commands.Cog):
     async def brawl(self, ctx, bet: int = 0):
         await ctx.defer()
 
+        strings = await get_language_strings(ctx)
+
+        scenes = strings["Brawl.Scenes"]
+        attack_means = strings["Brawl.AttackMeans"]
+        attack_spot = strings["Brawl.AttackSpot"]
+
         author_and_guild = f"{ctx.author.id}-{ctx.guild.id}"
 
         with open("Data/economics.json", "r") as economy_file:
@@ -33,7 +34,7 @@ class Game(commands.Cog):
 
         if author_and_guild not in users:
             embed = discord.Embed(
-                description=f"**Note:** Please create an account first using the `register` command.",
+                description=strings["Notes.CreateAccount"],
                 color=discord.Color.blue(),
             )
             await ctx.followup.send(embed=embed)
@@ -60,11 +61,11 @@ class Game(commands.Cog):
             if len(BRAWL[ctx.guild.id]["Players"]) > 1:
                 await BRAWL[ctx.guild.id]["Msg"].edit(view=None)
 
-                actions = ["**[1]** The brawl has begun!"]
+                actions = [strings["Brawl.LogMessage0"]]
                 player_multiplier = len(BRAWL[ctx.guild.id]["Players"])
 
                 embed_ = discord.Embed(
-                    title="Brawl log",
+                    title=strings["Brawl.BrawlLog"],
                     description=f"{actions[0]}",
                     color=discord.Color.dark_green(),
                 )
@@ -75,7 +76,7 @@ class Game(commands.Cog):
 
                     random_player = random.choice(list(BRAWL[ctx.guild.id]["Players"].keys()))
                     random_dmg = random.randrange(11)
-                    BRAWL[ctx.guild.id]['Players'][random_player]["HP"] -= random_dmg
+                    BRAWL[ctx.guild.id]["Players"][random_player]["HP"] -= random_dmg
                     filtered = {ctx.guild.id: []}
 
                     for player in BRAWL[ctx.guild.id]["Players"]:
@@ -83,27 +84,25 @@ class Game(commands.Cog):
                             filtered[ctx.guild.id].append(player)
 
                     if random_dmg == 0:
-                        action_message = (f"**{random.choice(filtered[ctx.guild.id])}** attacks **{random_player}** via"
-                                          f" {random.choice(ATTACK_MEANS)}, but misses and deals **{random_dmg}** "
-                                          f"damage, leaving them with "
-                                          f"**{BRAWL[ctx.guild.id]['Players'][random_player]['HP']}** health points.")
+                        action_message = strings["Brawl.AttackFailure"].format(
+                            random.choice(filtered[ctx.guild.id]), random_player, random.choice(attack_means),
+                            random_dmg, BRAWL[ctx.guild.id]["Players"][random_player]["HP"])
                         actions.append(f"[**{len(actions) + 1}**] {action_message}")
                     elif 0 < random_dmg < 10:
-                        action_message = (f"**{random.choice(filtered[ctx.guild.id])}** deals **{random_dmg}** damage "
-                                          f"to **{random_player}** via {random.choice(ATTACK_MEANS)}, leaving them with"
-                                          f" **{BRAWL[ctx.guild.id]['Players'][random_player]['HP']}** health points.")
+                        action_message = strings["Brawl.AttackSuccess"].format(
+                            random.choice(filtered[ctx.guild.id]), random_dmg, random_player,
+                            random.choice(attack_means), BRAWL[ctx.guild.id]["Players"][random_player]["HP"])
                         actions.append(f"[**{len(actions) + 1}**] {action_message}")
                     else:
-                        action_message = (f"**{random.choice(filtered[ctx.guild.id])}** spots a *critical* weakness and"
-                                          f" deals **{random_dmg}** damage to **{random_player}** via "
-                                          f"{random.choice(ATTACK_MEANS)}, leaving them with "
-                                          f"**{BRAWL[ctx.guild.id]['Players'][random_player]['HP']}** health points, "
-                                          f"and a very sore {random.choice(ATTACK_SPOT)}.")
+                        action_message = strings["Brawl.AttackCritical"].format(
+                            random.choice(filtered[ctx.guild.id]), random_dmg, random_player,
+                            random.choice(attack_means), BRAWL[ctx.guild.id]["Players"][random_player]["HP"],
+                            random.choice(attack_spot))
                         actions.append(f"[**{len(actions) + 1}**] {action_message}")
 
                     if BRAWL[ctx.guild.id]["Players"][random_player]["HP"] <= 0:
                         BRAWL[ctx.guild.id]["Fallen"] = True
-                        actions.append(f"[**{len(actions) + 1}X**] **{random_player}** has fallen.")
+                        actions.append(strings["Brawl.Fallen"].format(len(actions) + 1, random_player))
                         BRAWL[ctx.guild.id]["Players"].pop(random_player)
 
                     joined_actions = "\n".join(actions)
@@ -113,7 +112,7 @@ class Game(commands.Cog):
                     BRAWL[ctx.guild.id]["Fallen"] = False
 
                     embed_ = discord.Embed(
-                        title="Brawl log",
+                        title=strings["Brawl.BrawlLog"],
                         description=f"{joined_actions}",
                         color=color_choice
                     )
@@ -130,17 +129,15 @@ class Game(commands.Cog):
                         json.dump(users, economy_file_, indent=4)
 
                     embed_ = discord.Embed(
-                        description=f"**{list(BRAWL[ctx.guild.id]['Players'].keys())[0]}** has won the "
-                                    f"**{BRAWL[ctx.guild.id]['Scene']}**, and is crowned as champion. They have "
-                                    f"also found **{winnings}** ¤ in the pockets of the fallen brawlers.",
+                        description=strings["Brawl.Victory"].format(
+                            list(BRAWL[ctx.guild.id]["Players"].keys())[0], BRAWL[ctx.guild.id]["Scene"], winnings),
                         color=discord.Color.dark_gold(),
                     )
                     await interaction.followup.send(embed=embed_)
                 else:
                     embed_ = discord.Embed(
-                        description=f"**{list(BRAWL[ctx.guild.id]['Players'].keys())[0]}** has won the "
-                                    f"**{BRAWL[ctx.guild.id]['Scene']}**, and is crowned as champion. In the future"
-                                    f" they may consider using the `register` command, to collect their winnings.",
+                        description=strings["Brawl.VictoryNoAccount"].format(
+                            list(BRAWL[ctx.guild.id]["Players"].keys())[0], BRAWL[ctx.guild.id]["Scene"]),
                         color=discord.Color.dark_gold(),
                     )
                     await interaction.followup.send(embed=embed_)
@@ -149,47 +146,46 @@ class Game(commands.Cog):
                 del BRAWL[ctx.guild.id]
             else:
                 embed_ = discord.Embed(
-                    description="**Error:** Cannot start a brawl due to insufficient amount of brawlers.",
+                    description=strings["Errors.InsufficientBrawlers"],
                     color=discord.Color.red(),
                 )
                 await interaction.followup.send(embed=embed_, ephemeral=True)
                 return
 
         async def join_button_callback(interaction: discord.Interaction):
-            if bet and bet > users[author_and_guild]["Wallet"]:
+            author_and_guild_ = f"{interaction.user.id}-{ctx.guild.id}"
+
+            if bet and bet > users[author_and_guild_]["Wallet"]:
                 embed_ = discord.Embed(
-                    description=f"**Error:** Your wallet balance is too low to initialize a brawl with this bet.",
+                    description=strings["Errors.BrawlCannotAffordInitialize"],
                     color=discord.Color.red(),
                 )
                 await interaction.response.send_message(embed=embed_, ephemeral=True)
                 return
 
-            if ctx.author.name in BRAWL[ctx.guild.id]["Players"]:
+            if interaction.user.name in BRAWL[ctx.guild.id]["Players"]:
                 embed_ = discord.Embed(
-                    description=f"**Error:** You are already ready for the brawl.",
+                    description=strings["Errors.BrawlAlreadyReady"],
                     color=discord.Color.red(),
                 )
                 await interaction.response.send_message(embed=embed_, ephemeral=True)
                 return
             else:
-                BRAWL[ctx.guild.id]["Players"][ctx.author.name] = {"HP": 20, "ID": ctx.author.id}
+                BRAWL[ctx.guild.id]["Players"][interaction.user.name] = {"HP": 20, "ID": interaction.user.id}
 
                 users[author_and_guild]["Wallet"] -= BRAWL[ctx.guild.id]["Bet"]
 
                 with open("Data/economics.json", "w") as economy_file_:
                     json.dump(users, economy_file_, indent=4)
 
-                BRAWL[ctx.guild.id]["JoinMessages"].append(f"**{interaction.user.name}** has joined the brawl.")
-                joined_join_messages = "\n".join(BRAWL[ctx.guild.id]["JoinMessages"])
+                BRAWL[ctx.guild.id]["JoinMessages"].append(strings["Brawl.Joined"].format(interaction.user.name))
+                joined_join_messages_ = "\n".join(BRAWL[ctx.guild.id]["JoinMessages"])
 
                 embed_ = discord.Embed(
-                    title=f"{BRAWL[ctx.guild.id]['Scene']}",
-                    description=f"Uh-oh. Someone didn't like someone's face and now a classic brawl is about to break "
-                                f"out. Seems like rules won't apply in this match.\n\n"
-                                f"**Current brawlers:** {', '.join(BRAWL[ctx.guild.id]['Players'])} "
-                                f"[**{len(BRAWL[ctx.guild.id]['Players'])}**]\n"
-                                f"**Required bet:** {BRAWL[ctx.guild.id]['Bet']} ¤\n\n"
-                                f"**Join log:**\n{joined_join_messages}",
+                    title=BRAWL[ctx.guild.id]["Scene"],
+                    description=strings["Brawl.Desc"].format(
+                        ", ".join(BRAWL[ctx.guild.id]["Players"]), len(BRAWL[ctx.guild.id]["Players"]),
+                        BRAWL[ctx.guild.id]["Bet"], joined_join_messages_),
                     color=discord.Color.dark_green(),
                 )
                 await BRAWL[ctx.guild.id]["Msg"].edit(embed=embed_)
@@ -197,16 +193,18 @@ class Game(commands.Cog):
         async def cancel_button_callback(interaction: discord.Interaction):
             await interaction.response.defer()
 
-            if ctx.author.name not in BRAWL[ctx.guild.id]["Players"]:
+            if interaction.user.name not in BRAWL[ctx.guild.id]["Players"]:
                 embed_ = discord.Embed(
-                    description=f"**Error:** You are not partaking in a brawl.",
+                    description=strings["Errors.BrawlNotPartaking"],
                     color=discord.Color.red(),
                 )
                 await interaction.response.send_message(embed=embed_)
                 return
 
-            BRAWL[ctx.guild.id]["Players"].pop(ctx.author.name)
-            users[author_and_guild]["Wallet"] += BRAWL[ctx.guild.id]["Bet"]
+            author_and_guild_ = f"{interaction.user.id}-{ctx.guild.id}"
+
+            BRAWL[ctx.guild.id]["Players"].pop(interaction.user.name)
+            users[author_and_guild_]["Wallet"] += BRAWL[ctx.guild.id]["Bet"]
 
             with open("Data/economics.json", "w") as economy_file_:
                 json.dump(users, economy_file_, indent=4)
@@ -214,18 +212,17 @@ class Game(commands.Cog):
             if all(player["ID"] == 000000000000000000 for player in BRAWL[ctx.guild.id]["Players"].values()):
                 BRAWL[ctx.guild.id]["Players"].clear()
 
-            BRAWL[ctx.guild.id]["JoinMessages"].append(f"**{ctx.author.name}** became scared and ran away.")
-            joined_join_messages = "\n".join(BRAWL[ctx.guild.id]["JoinMessages"])
-            brawlers_and_bet = (f"**Current brawlers:** {', '.join(BRAWL[ctx.guild.id]['Players'])} "
-                                f"[**{len(BRAWL[ctx.guild.id]['Players'])}**]\n"
-                                f"**Required bet:** {BRAWL[ctx.guild.id]['Bet']} ¤")
+            BRAWL[ctx.guild.id]["JoinMessages"].append(strings["Brawl.Left"].format(interaction.user.name))
+            joined_join_messages_ = "\n".join(BRAWL[ctx.guild.id]["JoinMessages"])
+            brawlers_and_bet = strings["Brawl.BrawlersAndBet"].format(
+                ", ".join(BRAWL[ctx.guild.id]["Players"]), len(BRAWL[ctx.guild.id]["Players"]),
+                BRAWL[ctx.guild.id]["Bet"])
 
             embed_ = discord.Embed(
-                title=f"{BRAWL[ctx.guild.id]['Scene']}",
-                description=f"Uh-oh. Someone didn't like someone's face and now a classic brawl is about to break out. "
-                            f"Seems like rules won't apply in this match.\n\n"
-                            f"{brawlers_and_bet if BRAWL[ctx.guild.id]['Players'] else '**Brawl has been cancelled.**'}"
-                            f"\n\n**Join log:**\n{joined_join_messages}",
+                title=BRAWL[ctx.guild.id]["Scene"],
+                description=strings["Brawl.DescNoBrawlers"].format(
+                    brawlers_and_bet if BRAWL[ctx.guild.id]["Players"] else strings["Brawl.Cancelled"],
+                    joined_join_messages_),
                 color=discord.Color.dark_red(),
             )
             await BRAWL[ctx.guild.id]["Msg"].edit(embed=embed_)
@@ -237,24 +234,19 @@ class Game(commands.Cog):
         async def add_button_callback(interaction: discord.Interaction):
             await interaction.response.defer()
 
-            first_names = ["Harold", "El", "Bob", "Whatsisface", "Lightning", "Jake", "Ratchet", "Gaylord", "Nyan"]
-            second_names = ["the Midget Slayer", "Jefe", "Primo", "Worthington", "Buildman", "Droid mk I",
-                            "the Chosen", "Bot", "Shoehorn", "Caneman", "Nucleus"]
+            first_names, second_names = strings["Brawl.namelist0"], strings["Brawl.namelist1"]
 
             random_name = f"{random.choice(first_names)} {random.choice(second_names)}"
             BRAWL[ctx.guild.id]["Players"][random_name] = {"HP": 20, "ID": 000000000000000000}
 
-            BRAWL[ctx.guild.id]["JoinMessages"].append(f"**{random_name}** has joined the brawl.")
-            joined_join_messages = "\n".join(BRAWL[ctx.guild.id]["JoinMessages"])
+            BRAWL[ctx.guild.id]["JoinMessages"].append(strings["Brawl.Joined"].format(random_name))
+            joined_join_messages_ = "\n".join(BRAWL[ctx.guild.id]["JoinMessages"])
 
             embed_ = discord.Embed(
-                title=f"{BRAWL[ctx.guild.id]['Scene']}",
-                description=f"Uh-oh. Someone didn't like someone's face and now a classic brawl is about to break out. "
-                            f"Seems like rules won't apply in this match.\n\n"
-                            f"**Current brawlers:** "
-                            f"{', '.join(BRAWL[ctx.guild.id]['Players'])} [**{len(BRAWL[ctx.guild.id]['Players'])}**]\n"
-                            f"**Required bet:** {BRAWL[ctx.guild.id]['Bet']} ¤\n\n"
-                            f"**Join log:**\n{joined_join_messages}",
+                title=BRAWL[ctx.guild.id]["Scene"],
+                description=strings["Brawl.Desc"].format(
+                    ", ".join(BRAWL[ctx.guild.id]["Players"]), len(BRAWL[ctx.guild.id]["Players"]),
+                    BRAWL[ctx.guild.id]["Bet"], joined_join_messages_),
                 color=discord.Color.dark_green(),
             )
             await BRAWL[ctx.guild.id]["Msg"].edit(embed=embed_)
@@ -270,17 +262,14 @@ class Game(commands.Cog):
             bot = next((k, v) for k, v in BRAWL[ctx.guild.id]["Players"].items() if v["ID"] == 000000000000000000)
             BRAWL[ctx.guild.id]["Players"].pop(bot[0])
 
-            BRAWL[ctx.guild.id]["JoinMessages"].append(f"**{bot[0]}** has been removed from the site of the brawl.")
-            joined_join_messages = "\n".join(BRAWL[ctx.guild.id]["JoinMessages"])
+            BRAWL[ctx.guild.id]["JoinMessages"].append(strings["Brawl.Removed"].format(bot[0]))
+            joined_join_messages_ = "\n".join(BRAWL[ctx.guild.id]["JoinMessages"])
 
             embed_ = discord.Embed(
-                title=f"{BRAWL[ctx.guild.id]['Scene']}",
-                description=f"Uh-oh. Someone didn't like someone's face and now a classic brawl is about to break out. "
-                            f"Seems like rules won't apply in this match.\n\n"
-                            f"**Current brawlers:** "
-                            f"{', '.join(BRAWL[ctx.guild.id]['Players'])} [**{len(BRAWL[ctx.guild.id]['Players'])}**]\n"
-                            f"**Required bet:** {BRAWL[ctx.guild.id]['Bet']} ¤\n\n"
-                            f"**Join log:**\n{joined_join_messages}",
+                title=BRAWL[ctx.guild.id]["Scene"],
+                description=strings["Brawl.Desc"].format(
+                    ", ".join(BRAWL[ctx.guild.id]["Players"]), len(BRAWL[ctx.guild.id]["Players"]),
+                    BRAWL[ctx.guild.id]["Bet"], joined_join_messages_),
                 color=discord.Color.dark_red(),
             )
             await BRAWL[ctx.guild.id]["Msg"].edit(embed=embed_)
@@ -314,7 +303,7 @@ class Game(commands.Cog):
         if not BRAWL[ctx.guild.id]["State"]:
             if bet and bet > users[author_and_guild]["Wallet"]:
                 embed = discord.Embed(
-                    description=f"**Error:** Your wallet balance is too low to initialize a brawl with this bet.",
+                    description=strings["Errors.BrawlCannotAffordInitialize"],
                     color=discord.Color.red(),
                 )
                 await ctx.respond(embed=embed)
@@ -323,26 +312,26 @@ class Game(commands.Cog):
             BRAWL[ctx.guild.id]["Players"] = {ctx.author.name: {"HP": 20, "ID": ctx.author.id}}
             BRAWL[ctx.guild.id]["State"] = True
             BRAWL[ctx.guild.id]["Bet"] = bet
-            BRAWL[ctx.guild.id]["Scene"] = random.choice(SCENES)
+            BRAWL[ctx.guild.id]["Scene"] = random.choice(scenes)
             users[author_and_guild]["Wallet"] -= bet
 
             with open("Data/economics.json", "w") as economy_file:
                 json.dump(users, economy_file, indent=4)
 
+            joined_join_messages = "\n".join(BRAWL[ctx.guild.id]["JoinMessages"])
+
             embed = discord.Embed(
                 title=f"{BRAWL[ctx.guild.id]['Scene']}",
-                description=f"Uh-oh. Someone didn't like someone's face and now a classic brawl is about to break out. "
-                            f"Seems like rules won't apply in this match.\n\n"
-                            f"**Current brawlers:** "
-                            f"{', '.join(BRAWL[ctx.guild.id]['Players'])} [**{len(BRAWL[ctx.guild.id]['Players'])}**]\n"
-                            f"**Required bet:** {bet} ¤",
+                description=strings["Brawl.Desc"].format(
+                    ", ".join(BRAWL[ctx.guild.id]["Players"]), len(BRAWL[ctx.guild.id]["Players"]),
+                    BRAWL[ctx.guild.id]["Bet"], joined_join_messages),
                 color=discord.Color.dark_green(),
             )
             BRAWL[ctx.guild.id]["Msg"] = await ctx.followup.send(embed=embed, view=view2)
         else:
             if ctx.author.name in BRAWL[ctx.guild.id]["Players"]:
                 embed = discord.Embed(
-                    description=f"**Error:** You are already ready for the brawl.",
+                    description=strings["Errors.BrawlAlreadyReady"],
                     color=discord.Color.red(),
                 )
                 await ctx.respond(embed=embed, view=view4)
@@ -350,7 +339,7 @@ class Game(commands.Cog):
 
             if bet and bet > users[author_and_guild]["Wallet"]:
                 embed = discord.Embed(
-                    description=f"**Error:** Your wallet balance is too low to participate in the brawl.",
+                    description=strings["Errors.BrawlCannotAffordJoin"],
                     color=discord.Color.red(),
                 )
                 await ctx.respond(embed=embed)
@@ -363,9 +352,8 @@ class Game(commands.Cog):
                 json.dump(users, economy_file, indent=4)
 
             embed = discord.Embed(
-                description=f"**{ctx.author.name}** has joined the brawl.\n"
-                            f"**Current brawlers:** "
-                            f"{', '.join(BRAWL[ctx.guild.id]['Players'])} [**{len(BRAWL[ctx.guild.id]['Players'])}**]",
+                description=strings["Brawl.JoinedAndBrawlers"].format(
+                    ctx.author.name, ", ".join(BRAWL[ctx.guild.id]["Players"]), len(BRAWL[ctx.guild.id]["Players"])),
                 color=discord.Color.dark_green(),
             )
             await ctx.respond(embed=embed)
@@ -375,6 +363,8 @@ class Game(commands.Cog):
     async def blackjack(self, ctx, bet: int = 0):
         await ctx.defer()
 
+        strings = await get_language_strings(ctx)
+
         author_and_guild = f"{ctx.author.id}-{ctx.guild.id}"
 
         with open("Data/economics.json", "r") as f:
@@ -382,7 +372,7 @@ class Game(commands.Cog):
 
         if author_and_guild not in users:
             embed = discord.Embed(
-                description=f"**Note:** Please create an account first using the `register` command.",
+                description=strings["Notes.CreateAccount"],
                 color=discord.Color.blue(),
             )
             await ctx.followup.send(embed=embed)
@@ -434,13 +424,12 @@ class Game(commands.Cog):
                     BLACKJACK[ctx.guild.id][ctx.author.id]["PlayerValue"] += int(value_)
 
             embed_ = discord.Embed(
-                description=f"**Bet:** **{BLACKJACK[ctx.guild.id][ctx.author.id]['Bet']}** ¤\n\n"
-                            f"**Your hand:**\n"
-                            f"{BLACKJACK[ctx.guild.id][ctx.author.id]['PlayerJoined']}\n"
-                            f"**Total value:** {BLACKJACK[ctx.guild.id][ctx.author.id]['PlayerValue']}\n\n"
-                            f"**Dealer's hand:**\n"
-                            f"{BLACKJACK[ctx.guild.id][ctx.author.id]['DealerJoined']}\n"
-                            f"**Total value:** {BLACKJACK[ctx.guild.id][ctx.author.id]['DealerValue']}",
+                description=strings["Blackjack.Main"].format(
+                    BLACKJACK[ctx.guild.id][ctx.author.id]["Bet"],
+                    BLACKJACK[ctx.guild.id][ctx.author.id]["PlayerJoined"],
+                    BLACKJACK[ctx.guild.id][ctx.author.id]["PlayerValue"],
+                    BLACKJACK[ctx.guild.id][ctx.author.id]["DealerJoined"],
+                    BLACKJACK[ctx.guild.id][ctx.author.id]["DealerValue"]),
                 color=discord.Color.dark_green()
             )
             await interaction.followup.edit_message(message_id=BLACKJACK[ctx.guild.id][ctx.author.id]["Main"].id,
@@ -453,8 +442,8 @@ class Game(commands.Cog):
                     pass
 
                 embed_ = discord.Embed(
-                    description=f"You have won via blackjack. Congratulations, your wallet just got bigger by "
-                                f"**{int(BLACKJACK[ctx.guild.id][ctx.author.id]['Bet'] * 2.0)}** ¤",
+                    description=strings["Blackjack.VictoryBlackjack"].format(
+                        int(BLACKJACK[ctx.guild.id][ctx.author.id]["Bet"] * 2.0)),
                     color=discord.Color.dark_gold()
                 )
                 await ctx.send(embed=embed_)
@@ -475,8 +464,8 @@ class Game(commands.Cog):
                     pass
 
                 embed_ = discord.Embed(
-                    description=f"You have lost via overdrawing. Better luck next time, you have lost "
-                                f"**{BLACKJACK[ctx.guild.id][ctx.author.id]['Bet']}** ¤",
+                    description=strings["Blackjack.DefeatOverdraw"].format(
+                        BLACKJACK[ctx.guild.id][ctx.author.id]["Bet"]),
                     color=discord.Color.dark_red()
                 )
                 await ctx.send(embed=embed_)
@@ -535,21 +524,20 @@ class Game(commands.Cog):
                         BLACKJACK[ctx.guild.id][ctx.author.id]["DealerValue"] += int(value_)
 
                 embed_ = discord.Embed(
-                    description=f"**Bet:** **{BLACKJACK[ctx.guild.id][ctx.author.id]['Bet']}** ¤\n\n"
-                                f"**Your hand:**\n"
-                                f"{BLACKJACK[ctx.guild.id][ctx.author.id]['PlayerJoined']}\n"
-                                f"**Total value:** {BLACKJACK[ctx.guild.id][ctx.author.id]['PlayerValue']}\n\n"
-                                f"**Dealer's hand:**\n"
-                                f"{BLACKJACK[ctx.guild.id][ctx.author.id]['DealerJoined']}\n"
-                                f"**Total value:** {BLACKJACK[ctx.guild.id][ctx.author.id]['DealerValue']}",
+                    description=strings["Blackjack.Main"].format(
+                        BLACKJACK[ctx.guild.id][ctx.author.id]["Bet"],
+                        BLACKJACK[ctx.guild.id][ctx.author.id]["PlayerJoined"],
+                        BLACKJACK[ctx.guild.id][ctx.author.id]["PlayerValue"],
+                        BLACKJACK[ctx.guild.id][ctx.author.id]["DealerJoined"],
+                        BLACKJACK[ctx.guild.id][ctx.author.id]["DealerValue"]),
                     color=discord.Color.dark_green()
                 )
                 await BLACKJACK[ctx.guild.id][ctx.author.id]["Main"].edit(embed=embed_)
 
             if BLACKJACK[ctx.guild.id][ctx.author.id]["DealerValue"] == 21:
                 embed_ = discord.Embed(
-                    description=f"Dealer has won via blackjack. Better luck next time, you have lost "
-                                f"**{BLACKJACK[ctx.guild.id][ctx.author.id]['Bet']}** ¤",
+                    description=strings["Blackjack.DefeatBlackjack"].format(
+                        BLACKJACK[ctx.guild.id][ctx.author.id]["Bet"]),
                     color=discord.Color.dark_red()
                 )
                 await ctx.send(embed=embed_)
@@ -560,8 +548,8 @@ class Game(commands.Cog):
                     del BLACKJACK[ctx.guild.id]
             elif BLACKJACK[ctx.guild.id][ctx.author.id]["DealerValue"] > 21:
                 embed_ = discord.Embed(
-                    description=f"You have won via dealer overdrawing. Congratulations, your wallet just got bigger by "
-                                f"**{int(BLACKJACK[ctx.guild.id][ctx.author.id]['Bet'] * 2.0)}** ¤",
+                    description=strings["Blackjack.VictoryOverdraw"].format(
+                        int(BLACKJACK[ctx.guild.id][ctx.author.id]["Bet"] * 2.0)),
                     color=discord.Color.dark_gold()
                 )
                 await ctx.send(embed=embed_)
@@ -578,8 +566,7 @@ class Game(commands.Cog):
             elif BLACKJACK[ctx.guild.id][ctx.author.id]["DealerValue"] == \
                     BLACKJACK[ctx.guild.id][ctx.author.id]["PlayerValue"]:
                 embed_ = discord.Embed(
-                    description=f"You have tied with the dealer. Your wallet has been refunded "
-                                f"**{BLACKJACK[ctx.guild.id][ctx.author.id]['Bet']}** ¤",
+                    description=strings["Blackjack.Tie"].format(BLACKJACK[ctx.guild.id][ctx.author.id]["Bet"]),
                     color=discord.Color.dark_blue()
                 )
                 await ctx.send(embed=embed_)
@@ -595,8 +582,7 @@ class Game(commands.Cog):
                     del BLACKJACK[ctx.guild.id]
             else:
                 embed_ = discord.Embed(
-                    description=f"Dealer has won via higher value cards. Better luck next time, you have lost "
-                                f"**{BLACKJACK[ctx.guild.id][ctx.author.id]['Bet']}** ¤",
+                    description=strings["Blackjack.DefeatHigher"].format(BLACKJACK[ctx.guild.id][ctx.author.id]["Bet"]),
                     color=discord.Color.dark_red()
                 )
                 await ctx.send(embed=embed_)
@@ -616,7 +602,7 @@ class Game(commands.Cog):
 
         if BLACKJACK[ctx.guild.id] and BLACKJACK[ctx.guild.id][ctx.author.id]["State"]:
             embed = discord.Embed(
-                description=f"**Error:** There is already an active game of blackjack.",
+                description=strings["Errors.BlackjackAlreadyActive"],
                 color=discord.Color.red(),
             )
             BLACKJACK[ctx.guild.id][ctx.author.id]["ErrorMsg"] = await ctx.followup.send(embed=embed, view=view2)
@@ -624,7 +610,7 @@ class Game(commands.Cog):
 
         if bet > users[author_and_guild]["Wallet"]:
             embed = discord.Embed(
-                description=f"**Error:** Your wallet balance is too low to place a bet.",
+                description=strings["Errors.BlackjackCannotAffordBet"],
                 color=discord.Color.red(),
             )
             await ctx.followup.send(embed=embed)
@@ -687,13 +673,12 @@ class Game(commands.Cog):
                     BLACKJACK[ctx.guild.id][ctx.author.id]["DealerValue"] += int(value)
 
         embed = discord.Embed(
-            description=f"**Bet:** **{BLACKJACK[ctx.guild.id][ctx.author.id]['Bet']}** ¤\n\n"
-                        f"**Your hand:**\n"
-                        f"{BLACKJACK[ctx.guild.id][ctx.author.id]['PlayerJoined']}\n"
-                        f"**Total value:** {BLACKJACK[ctx.guild.id][ctx.author.id]['PlayerValue']}\n\n"
-                        f"**Dealer's hand:**\n"
-                        f"{BLACKJACK[ctx.guild.id][ctx.author.id]['DealerJoined']}\n"
-                        f"**Total value:** {BLACKJACK[ctx.guild.id][ctx.author.id]['DealerValue']}",
+            description=strings["Blackjack.Main"].format(
+                BLACKJACK[ctx.guild.id][ctx.author.id]["Bet"],
+                BLACKJACK[ctx.guild.id][ctx.author.id]["PlayerJoined"],
+                BLACKJACK[ctx.guild.id][ctx.author.id]["PlayerValue"],
+                BLACKJACK[ctx.guild.id][ctx.author.id]["DealerJoined"],
+                BLACKJACK[ctx.guild.id][ctx.author.id]["DealerValue"]),
             color=discord.Color.dark_green(),
         )
         BLACKJACK[ctx.guild.id][ctx.author.id]["Main"] = await ctx.followup.send(embed=embed, view=view)
@@ -705,8 +690,8 @@ class Game(commands.Cog):
                 pass
 
             embed = discord.Embed(
-                description=f"You have won via blackjack. Congratulations, your wallet just got bigger by "
-                            f"**{int(BLACKJACK[ctx.guild.id][ctx.author.id]['Bet'] * 2.0)}** ¤",
+                description=strings["Blackjack.VictoryBlackjack"].format(
+                    int(BLACKJACK[ctx.guild.id][ctx.author.id]["Bet"] * 2.0)),
                 color=discord.Color.dark_gold()
             )
             await ctx.send(embed=embed)
