@@ -15,6 +15,12 @@ ShifuBot has come a long way in the few years that it has been in development, a
 ## Changelog
 
 <details>
+    <summary>v1.0.3</summary>
+    
+    - Fixed cleanup not being initialized properly after a forced disconnect.
+      * Also added a message for when the bot is disconnected this way.
+</details>
+<details>
     <summary>v1.0.2</summary>
     
     - Added support for custom languages.

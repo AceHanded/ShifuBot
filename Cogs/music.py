@@ -66,13 +66,12 @@ class Music(commands.Cog):
         if member.guild.voice_client and member.guild.voice_client.channel == before.channel:
             text_channel = self.bot.get_channel(PLAYER_INFO.get(member.guild.id, {}).get("TextChannel"))
 
-            if (len(channel.members) == 1 and channel.members[0].id == 870702473126490132) or \
-                    all([member.bot for member in channel.members]):
+            if len(channel.members) < 2 or all([member.bot for member in channel.members]):
+                strings = await get_language_strings(member)
+
                 await self.cleanup(member)
 
-                if member.guild.voice_client and member.guild.voice_client.is_connected():
-                    strings = await get_language_strings(member)
-
+                try:
                     await member.guild.voice_client.disconnect()
 
                     embed = discord.Embed(
@@ -80,6 +79,12 @@ class Music(commands.Cog):
                         color=discord.Color.dark_red(),
                     )
                     embed.set_footer(text=strings["Music.Disconnecting"])
+                    await text_channel.send(embed=embed)
+                except AttributeError:
+                    embed = discord.Embed(
+                        description=strings["Music.Disconnect"].format(before.channel),
+                        color=discord.Color.dark_red(),
+                    )
                     await text_channel.send(embed=embed)
 
     @tasks.loop()
@@ -209,7 +214,8 @@ class Music(commands.Cog):
             channel = self.bot.get_guild(int(ctx.guild.id)).get_channel(PLAYER_INFO[ctx.guild.id]["TextChannel"])
             message = await channel.fetch_message(PLAYER_INFO[ctx.guild.id]["EmbedID"])
             await message.edit(view=None)
-        except (discord.NotFound, discord.HTTPException, AttributeError, KeyError, UnboundLocalError):
+        except (discord.NotFound, discord.HTTPException, AttributeError, KeyError, UnboundLocalError) as e:
+            print(e)
             pass
 
         for dictionary in (QUEUE, PLAYER_INFO, PLAY_TIMER, PLAYER_MOD, INVOKED):
