@@ -15,6 +15,11 @@ ShifuBot has come a long way in the few years that it has been in development, a
 ## Changelog
 
 <details>
+    <summary>v1.0.4</summary>
+    
+    - Fixed an issue that caused the music-related properties of a guild to be saved to dictionaries, even if an error occurs.
+</details>
+<details>
     <summary>v1.0.3</summary>
     
     - Fixed cleanup not being initialized properly after a forced disconnect.

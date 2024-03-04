@@ -214,8 +214,7 @@ class Music(commands.Cog):
             channel = self.bot.get_guild(int(ctx.guild.id)).get_channel(PLAYER_INFO[ctx.guild.id]["TextChannel"])
             message = await channel.fetch_message(PLAYER_INFO[ctx.guild.id]["EmbedID"])
             await message.edit(view=None)
-        except (discord.NotFound, discord.HTTPException, AttributeError, KeyError, UnboundLocalError) as e:
-            print(e)
+        except (discord.NotFound, discord.HTTPException, AttributeError, KeyError, UnboundLocalError):
             pass
 
         for dictionary in (QUEUE, PLAYER_INFO, PLAY_TIMER, PLAYER_MOD, INVOKED):
@@ -235,6 +234,7 @@ class Music(commands.Cog):
         channel = await connect_handling(ctx)
 
         if not channel:
+            await self.cleanup(ctx)
             return
         PLAYER_INFO[ctx.guild.id]["TextChannel"] = ctx.channel.id
 
@@ -258,6 +258,8 @@ class Music(commands.Cog):
         channel = await connect_handling(ctx, play_command=True)
 
         if not channel:
+            if not ctx.voice_client:
+                await self.cleanup(ctx)
             return
         PLAYER_INFO[ctx.guild.id]["TextChannel"] = ctx.channel.id
 
@@ -966,6 +968,9 @@ class Music(commands.Cog):
                 await ctx.send(embed=embed)
             else:
                 await ctx.respond(embed=embed)
+
+            if not ctx.voice_client:
+                await self.cleanup(ctx)
             return
 
         if ";" in from_:
@@ -1154,6 +1159,9 @@ class Music(commands.Cog):
                     PLAYER_MOD[ctx.guild.id]["Filter"]["Name"], PLAYER_MOD[ctx.guild.id]["Filter"]["Intensity"],
                     PLAYER_MOD[ctx.guild.id]["Loop"]))
             await ctx.respond(embed=embed)
+
+            if not ctx.voice_client:
+                await self.cleanup(ctx)
             return
 
         positional_queue = {"List": [], "Formatted": ""}
@@ -1298,6 +1306,9 @@ class Music(commands.Cog):
                 color=discord.Color.red(),
             )
             await ctx.respond(embed=embed)
+
+            if not ctx.voice_client:
+                await self.cleanup(ctx)
             return
 
         if not to:
@@ -1338,6 +1349,9 @@ class Music(commands.Cog):
                 color=discord.Color.red(),
             )
             await ctx.respond(embed=embed)
+
+            if not ctx.voice_client:
+                await self.cleanup(ctx)
             return
 
         from_ = min(max(from_, 1), len(QUEUE[ctx.guild.id]["Current"]) - 1)
@@ -1405,6 +1419,9 @@ class Music(commands.Cog):
                 await ctx.send(embed=embed)
             else:
                 await ctx.respond(embed=embed)
+
+            if not ctx.voice_client:
+                await self.cleanup(ctx)
             return
 
         if PLAYER_MOD[ctx.guild.id]["Loop"] == "Single" or (PLAYER_MOD[ctx.guild.id]["Loop"] == "Queue" and
@@ -1516,7 +1533,17 @@ class Music(commands.Cog):
 
         strings = await get_language_strings(ctx)
 
-        if not mode:
+        if not ctx.voice_client or not ctx.voice_client.is_connected():
+            embed = discord.Embed(
+                description=strings["Errors.NotConnected"],
+                color=discord.Color.red(),
+            )
+            await ctx.respond(embed=embed)
+
+            if not ctx.voice_client:
+                await self.cleanup(ctx)
+            return
+        elif not mode:
             embed = discord.Embed(
                 description=strings["Music.Loop"].format(PLAYER_MOD[ctx.guild.id]["Loop"]),
                 color=discord.Color.dark_gold(),
@@ -1558,6 +1585,9 @@ class Music(commands.Cog):
                 await ctx.send(embed=embed)
             else:
                 await ctx.respond(embed=embed)
+
+            if not ctx.voice_client:
+                await self.cleanup(ctx)
             return
         elif ctx.voice_client.is_playing():
             embed = discord.Embed(
@@ -1598,6 +1628,17 @@ class Music(commands.Cog):
         await ctx.defer()
 
         strings = await get_language_strings(ctx)
+
+        if not ctx.voice_client or not ctx.voice_client.is_connected():
+            embed = discord.Embed(
+                description=strings["Errors.NotConnected"],
+                color=discord.Color.red(),
+            )
+            await ctx.respond(embed=embed)
+
+            if not ctx.voice_client:
+                await self.cleanup(ctx)
+            return
 
         if intensity:
             intensity = min(max(intensity, 0), 100)
@@ -1704,7 +1745,17 @@ class Music(commands.Cog):
 
         strings = await get_language_strings(ctx)
 
-        if level is None:
+        if not ctx.voice_client or not ctx.voice_client.is_connected():
+            embed = discord.Embed(
+                description=strings["Errors.NotConnected"],
+                color=discord.Color.red(),
+            )
+            await ctx.respond(embed=embed)
+
+            if not ctx.voice_client:
+                await self.cleanup(ctx)
+            return
+        elif level is None:
             embed = discord.Embed(
                 description=strings["Music.Volume"].format(int(PLAYER_MOD[ctx.guild.id]["Volume"] * 100)),
                 color=discord.Color.dark_gold(),
@@ -1750,6 +1801,9 @@ class Music(commands.Cog):
                 await ctx.send(embed=embed)
             else:
                 await ctx.respond(embed=embed)
+
+            if not ctx.voice_client:
+                await self.cleanup(ctx)
             return
 
         insert = min(max(insert, 1), len(QUEUE[ctx.guild.id]["Current"]))
@@ -1817,6 +1871,9 @@ class Music(commands.Cog):
                 color=discord.Color.red(),
             )
             await ctx.respond(embed=embed)
+
+            if not ctx.voice_client:
+                await self.cleanup(ctx)
             return
         elif PLAYER_INFO[ctx.guild.id]["Object"].formatted_duration == "Live":
             embed = discord.Embed(
@@ -1980,7 +2037,6 @@ class Music(commands.Cog):
     @volume.before_invoke
     @replay.before_invoke
     @seek.before_invoke
-    @lyrics.before_invoke
     async def ensure_dicts(self, ctx):
         if ctx.guild.id not in QUEUE:
             QUEUE[ctx.guild.id] = {"Current": [], "Previous": [], "Sum": 0}
