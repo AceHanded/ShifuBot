@@ -15,6 +15,11 @@ ShifuBot has come a long way in the few years that it has been in development, a
 ## Changelog
 
 <details>
+    <summary>v1.0.5</summary>
+    
+    - Fixed an issue that caused the `seek` and `filter` commands to work extremely slowly, especially with longer songs.
+</details>
+<details>
     <summary>v1.0.4</summary>
     
     - Fixed an issue that caused the music-related properties of a guild to be saved to dictionaries, even if an error occurs.

@@ -196,7 +196,9 @@ async def on_ready():
           f"{f' ({Color.RED}{len(invalid_message_guilds)} removals{Color.END})' if invalid_message_guilds else ''}")
 
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="tracks | /help"))
-    resource_display.start()
+
+    if not resource_display.is_running():
+        resource_display.start()
 
 
 @bot.slash_command(description="Displays performance statistics")

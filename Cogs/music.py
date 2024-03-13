@@ -38,8 +38,9 @@ class YTDLSource(discord.PCMVolumeTransformer):
 
     @classmethod
     async def from_url(cls, url, *, loop=None, stream=False, filter_=None, start_at=None):
-        ffmpeg_options = {"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-                          "options": f"-vn {filter_ if filter_ else ''} -ss {start_at if start_at else 0}"}
+        ffmpeg_options = {"before_options": f"{f'-ss {start_at}' if start_at else ''} "
+                                            f"-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+                          "options": f"{f'-vn {filter_}' if filter_ else ''}"}
 
         loop = loop or asyncio.get_event_loop()
         data = await loop.run_in_executor(ThreadPoolExecutor(),
@@ -460,7 +461,7 @@ class Music(commands.Cog):
                     )
                     await main.edit(embed=embed)
 
-                    if not ctx.voice_client.is_playing():
+                    if ctx.voice_client and not ctx.voice_client.is_playing():
                         QUEUE[ctx.guild.id]["Current"][0] = await YTDLSource.from_url(QUEUE[ctx.guild.id]["Current"][0],
                                                                                       loop=self.bot.loop, stream=True)
 
@@ -564,7 +565,7 @@ class Music(commands.Cog):
             )
             await main.edit(embed=embed)
 
-            if not ctx.voice_client.is_playing():
+            if ctx.voice_client and not ctx.voice_client.is_playing():
                 QUEUE[ctx.guild.id]["Current"][0] = await YTDLSource.from_url(QUEUE[ctx.guild.id]["Current"][0],
                                                                               loop=self.bot.loop, stream=True)
 
@@ -1836,7 +1837,7 @@ class Music(commands.Cog):
                 PLAY_TIMER[ctx.guild.id]["Old"] = 0
             return
 
-        if not ctx.voice_client.is_playing() and not QUEUE[ctx.guild.id]["Current"]:
+        if (ctx.voice_client and not ctx.voice_client.is_playing()) and not QUEUE[ctx.guild.id]["Current"]:
             embed = discord.Embed(
                 description=strings["Music.ReplayLast"].format(replayed_player.title),
                 color=discord.Color.purple(),
@@ -1887,6 +1888,8 @@ class Music(commands.Cog):
 
         if new_timer_value is None:
             return
+        elif new_timer_value >= PLAYER_INFO[ctx.guild.id]["Object"].duration:
+            new_timer_value = PLAYER_INFO[ctx.guild.id]["Object"].duration
 
         INVOKED[ctx.guild.id] = True
         previous_song = QUEUE[ctx.guild.id]["Current"][0]
@@ -1914,9 +1917,6 @@ class Music(commands.Cog):
             except discord.ClientException:
                 await asyncio.sleep(1)
                 continue
-
-        if sought >= PLAYER_INFO[ctx.guild.id]["Object"].formatted_duration:
-            sought = PLAYER_INFO[ctx.guild.id]["Object"].formatted_duration
 
         embed = discord.Embed(
             description=strings["Music.SeekSuccess"].format(
