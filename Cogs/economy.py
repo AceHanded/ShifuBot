@@ -1,442 +1,365 @@
 import discord
-from discord import option
 from discord.ext import commands
 from discord.ui import Button, View
 import json
 import random
-import asyncio
-from Cogs.utils import get_language_strings
-
-
-COOLDOWN = {}
+import time
 
 
 class Economy(commands.Cog):
-    def __init__(self, bot):
+    def __init__(self, bot: discord.Bot):
         self.bot = bot
 
-    @commands.slash_command(description="Create an account")
-    async def register(self, ctx):
-        await ctx.defer()
+        self.cooldown = {}
+        self.users = {}
+        self.gui = {}
+        self.views = {}
 
-        strings = await get_language_strings(ctx)
+    async def resolve_gui_callback(self, ctx: discord.ApplicationContext, gui_element: str):
+        async def yes_callback(interaction: discord.Interaction):
+            author_and_guild = f"{interaction.user.id}-{ctx.guild.id}"
+            del self.users[ctx.guild.id][author_and_guild]
+
+            with open("Data/economics.json", "w") as economy_file:
+                json.dump(self.users[ctx.guild.id], economy_file, indent=4)
+
+            embed = discord.Embed(
+                description=f"Successfully unregistered an account for **{interaction.user.name}**.",
+                color=discord.Color.dark_green()
+            )
+            await interaction.response.edit_message(embed=embed, view=None)
+
+        async def no_callback(interaction: discord.Interaction):
+            embed = discord.Embed(
+                description=f"Canceled unregistering account for **{interaction.user.name}**.",
+                color=discord.Color.dark_red()
+            )
+            await interaction.response.edit_message(embed=embed, view=None)
+
+        callbacks = {
+            "yes": yes_callback,
+            "no": no_callback
+        }
+        return callbacks[gui_element]
+
+    async def transfer(self, ctx: discord.ApplicationContext, amount: int, deposit: bool = False):
+        author_and_guild = f"{ctx.author.id}-{ctx.guild.id}"
+        transfer_source = "wallet" if deposit else "bank"
+        transfer_target = "bank" if deposit else "wallet"
+
+        with open("Data/economics.json", "r") as economy_file:
+            self.users[ctx.guild.id] = json.load(economy_file)
+
+        if author_and_guild not in self.users[ctx.guild.id]:
+            embed = discord.Embed(
+                description="**Error:** User has not registered an account.",
+                color=discord.Color.red()
+            )
+            await ctx.respond(embed=embed)
+            return
+        elif self.users[ctx.guild.id][author_and_guild][transfer_source] <= 0:
+            embed = discord.Embed(
+                description=f"**Error:** Nothing to {'deposit' if deposit else 'withdraw'}.",
+                color=discord.Color.red()
+            )
+            await ctx.respond(embed=embed)
+            return
+
+        amount = min(max(amount, 0), self.users[ctx.guild.id][author_and_guild][transfer_source])
+        self.users[ctx.guild.id][author_and_guild][transfer_source] -= amount
+        self.users[ctx.guild.id][author_and_guild][transfer_target] += amount
+
+        with open("Data/economics.json", "w") as economy_file:
+            json.dump(self.users[ctx.guild.id], economy_file, indent=4)
+
+        transfer_message = f"Successfully deposited **{amount}** ¤ to your bank." if deposit else \
+            f"Successfully withdrew **{amount}** ¤ from your bank."
+
+        embed = discord.Embed(
+            description=transfer_message,
+            color=discord.Color.dark_green()
+        )
+        await ctx.respond(embed=embed)
+
+    async def handle_action(self, ctx: discord.ApplicationContext, author_id: int, amount: int, victim_id: int = None):
+        author_and_guild = f"{author_id}-{ctx.guild.id}"
+        victim_and_guild = f"{victim_id}-{ctx.guild.id}"
+
+        with open("Data/economics.json", "r") as economy_file:
+            self.users[ctx.guild.id] = json.load(economy_file)
+
+        if author_and_guild not in self.users[ctx.guild.id]:
+            embed = discord.Embed(
+                description="**Error:** You have not registered an account.",
+                color=discord.Color.red()
+            )
+            await ctx.respond(embed=embed)
+            return False
+        elif victim_id and victim_and_guild not in self.users[ctx.guild.id]:
+            embed = discord.Embed(
+                description="**Error:** User has not registered an account.",
+                color=discord.Color.red()
+            )
+            await ctx.respond(embed=embed)
+            return False
+        elif author_and_guild == victim_and_guild:
+            embed = discord.Embed(
+                description="**Error:** You cannot rob yourself.",
+                color=discord.Color.red()
+            )
+            await ctx.respond(embed=embed)
+            return False
+
+        elapsed_beg_cooldown, elapsed_rob_cooldown = await self.count_cooldowns(ctx)
+
+        if not victim_id:
+            if not elapsed_beg_cooldown or elapsed_beg_cooldown >= 120:
+                self.cooldown[ctx.guild.id][ctx.author.id]["beg"] = time.time()
+            else:
+                embed = discord.Embed(
+                    description=f"**Error:** Your `beg` command is on cooldown (**{120 - elapsed_beg_cooldown}** s).",
+                    color=discord.Color.red()
+                )
+                await ctx.respond(embed=embed)
+                return False
+        else:
+            if not elapsed_rob_cooldown or elapsed_rob_cooldown >= 120:
+                self.cooldown[ctx.guild.id][ctx.author.id]["rob"] = time.time()
+            else:
+                embed = discord.Embed(
+                    description=f"**Error:** Your `rob` command is on cooldown (**{120 - elapsed_rob_cooldown}** s).",
+                    color=discord.Color.red()
+                )
+                await ctx.respond(embed=embed)
+                return False
+
+        self.users[ctx.guild.id][author_and_guild]["wallet"] += amount
+
+        if victim_id:
+            self.users[ctx.guild.id][victim_and_guild]["wallet"] -= amount
+
+        with open("Data/economics.json", "w") as economy_file:
+            json.dump(self.users[ctx.guild.id], economy_file, indent=4)
+
+        return True
+
+    async def get_total_balance(self, ctx: discord.ApplicationContext, user_id: int):
+        with open("Data/economics.json", "r") as economy_file:
+            self.users[ctx.guild.id] = json.load(economy_file)
+
+        author_and_guild = f"{user_id}-{ctx.guild.id}"
+
+        return self.users[ctx.guild.id][author_and_guild]["wallet"] + self.users[ctx.guild.id][author_and_guild]["bank"]
+
+    async def count_cooldowns(self, ctx: discord.ApplicationContext):
+        elapsed_beg_cooldown = int(time.time() - self.cooldown[ctx.guild.id][ctx.author.id]["beg"]) if \
+            self.cooldown[ctx.guild.id][ctx.author.id]["beg"] else None
+        elapsed_rob_cooldown = int(time.time() - self.cooldown[ctx.guild.id][ctx.author.id]["rob"]) if \
+            self.cooldown[ctx.guild.id][ctx.author.id]["rob"] else None
+
+        return elapsed_beg_cooldown, elapsed_rob_cooldown
+
+    @commands.slash_command(description="Create an account")
+    async def register(self, ctx: discord.ApplicationContext):
+        await ctx.defer()
 
         author_and_guild = f"{ctx.author.id}-{ctx.guild.id}"
 
         with open("Data/economics.json", "r") as economy_file:
-            users = json.load(economy_file)
+            self.users[ctx.guild.id] = json.load(economy_file)
 
-        if author_and_guild in users:
+        if author_and_guild in self.users[ctx.guild.id]:
             embed = discord.Embed(
-                description=strings["Errors.AccountExists"],
-                color=discord.Color.red(),
+                description="**Error:** An account already exists for this user.",
+                color=discord.Color.red()
             )
-            await ctx.followup.send(embed=embed)
+            await ctx.respond(embed=embed)
             return
 
-        users[author_and_guild] = {"Wallet": 0, "Bank": 100, "Inventory": {}}
+        self.users[ctx.guild.id][author_and_guild] = {"wallet": 0, "bank": 100}
 
         with open("Data/economics.json", "w") as economy_file:
-            json.dump(users, economy_file, indent=4)
+            json.dump(self.users[ctx.guild.id], economy_file, indent=4)
 
         embed = discord.Embed(
-            description=strings["Economy.Register"].format(ctx.author.name),
-            color=discord.Color.dark_green(),
+            description=f"Successfully registered an account for **{ctx.author.name}**",
+            color=discord.Color.dark_green()
         )
-        await ctx.followup.send(embed=embed)
+        await ctx.respond(embed=embed)
 
     @commands.slash_command(description="Delete your account")
-    async def unregister(self, ctx):
+    async def unregister(self, ctx: discord.ApplicationContext):
         await ctx.defer()
-
-        strings = await get_language_strings(ctx)
 
         author_and_guild = f"{ctx.author.id}-{ctx.guild.id}"
 
         with open("Data/economics.json", "r") as economy_file:
-            users = json.load(economy_file)
+            self.users[ctx.guild.id] = json.load(economy_file)
 
-        if author_and_guild not in users:
+        if author_and_guild not in self.users[ctx.guild.id]:
             embed = discord.Embed(
-                description=strings["Errors.AlreadyNoAccount"],
-                color=discord.Color.red(),
+                description="**Error:** An account already does not exist for this user.",
+                color=discord.Color.red()
             )
-            await ctx.followup.send(embed=embed)
+            await ctx.respond(embed=embed)
             return
 
-        yes_button = Button(style=discord.ButtonStyle.success, label="Yes", row=1)
-        no_button = Button(style=discord.ButtonStyle.danger, label="No", row=1)
-
-        async def yes_button_callback(interaction: discord.Interaction):
-            del users[author_and_guild]
-
-            with open("Data/economics.json", "w") as economy_file_:
-                json.dump(users, economy_file_, indent=4)
-
-            embed_ = discord.Embed(
-                description=strings["Economy.UnregisterSuccess"],
-                color=discord.Color.dark_red(),
-            )
-            view.remove_item(yes_button), view.remove_item(no_button)
-            await interaction.response.edit_message(embed=embed_, view=view)
-
-        async def no_button_callback(interaction: discord.Interaction):
-            embed_ = discord.Embed(
-                description=strings["Economy.UnregisterCancel"],
-                color=discord.Color.dark_red(),
-            )
-            view.remove_item(yes_button), view.remove_item(no_button)
-            await interaction.response.edit_message(embed=embed_, view=view)
-
-        yes_button.callback, no_button.callback = yes_button_callback, no_button_callback
-        view = View(timeout=None)
-        view.add_item(yes_button), view.add_item(no_button)
-
         embed = discord.Embed(
-            description=strings["Economy.Unregister"].format(ctx.guild.name),
-            color=discord.Color.dark_green(),
+            description=f"Are you sure you wish to delete your account on **{ctx.guild.name}**?",
+            color=discord.Color.dark_green()
         )
-        await ctx.followup.send(embed=embed, view=view)
+        await ctx.respond(embed=embed, view=self.views[ctx.guild.id])
 
     @commands.slash_command(description="Displays the user's current balance")
-    @option(name="user", description="The user whose account balance you wish to see", required=False)
-    async def balance(self, ctx, user: discord.User = None):
+    @discord.option(name="user", description="The user whose account balance you wish to see", required=False)
+    async def balance(self, ctx: discord.ApplicationContext, user: discord.User = None):
         await ctx.defer()
 
-        strings = await get_language_strings(ctx)
-
-        if not user:
-            author_and_guild = f"{ctx.author.id}-{ctx.guild.id}"
-        else:
-            author_and_guild = f"{user.id}-{ctx.guild.id}"
+        author_and_guild = f"{ctx.author.id if not user else user.id}-{ctx.guild.id}"
 
         with open("Data/economics.json", "r") as economy_file:
-            users = json.load(economy_file)
+            self.users[ctx.guild.id] = json.load(economy_file)
 
-        if not user and author_and_guild not in users:
+        if author_and_guild not in self.users[ctx.guild.id]:
             embed = discord.Embed(
-                description=strings["Notes.CreateAccount"],
-                color=discord.Color.blue(),
+                description=f"**Error:** {'User has' if user else 'You have'} not registered an account.",
+                color=discord.Color.red()
             )
-            await ctx.followup.send(embed=embed)
-            return
-        elif author_and_guild not in users:
-            embed = discord.Embed(
-                description=strings["Errors.UserNoAccount"],
-                color=discord.Color.red(),
-            )
-            await ctx.followup.send(embed=embed)
+            await ctx.respond(embed=embed)
             return
 
-        user_inventory = []
-        for item in users[author_and_guild]["Inventory"]:
-            user_inventory.append(f"{item} [**{users[author_and_guild]['Inventory'][item]}**]")
+        user_info = self.users[ctx.guild.id][author_and_guild]
+        total_balance = await self.get_total_balance(ctx, ctx.author.id if not user else user.id)
 
         embed = discord.Embed(
-            title=strings["Economy.Balance"].format(ctx.author.name if not user else user.name),
-            description=strings["Economy.BalanceDesc"].format(
-                users[author_and_guild]["Wallet"], users[author_and_guild]["Bank"],
-                users[author_and_guild]["Wallet"] + users[author_and_guild]["Bank"],
-                ", ".join(user_inventory) if len(users[author_and_guild]["Inventory"]) > 0 else None),
-            color=discord.Color.dark_green(),
+            description=f"**Balance of {ctx.author.name if not user else user.name}**\n\n**Wallet:** "
+                        f"{user_info['wallet']} ¤ - **Bank:** {user_info['bank']} ¤\n**Total:** {total_balance} ¤",
+            color=discord.Color.dark_green()
         )
-        await ctx.followup.send(embed=embed)
-
-    @commands.slash_command(description="Beg for a chance to gain credits")
-    async def beg(self, ctx):
-        await ctx.defer()
-
-        strings = await get_language_strings(ctx)
-
-        with open("Data/economics.json", "r") as economy_file:
-            users = json.load(economy_file)
-      
-        author_and_guild = f"{ctx.author.id}-{ctx.guild.id}"
-
-        if author_and_guild not in users:
-            embed = discord.Embed(
-                description=strings["Notes.CreateAccount"],
-                color=discord.Color.blue(),
-            )
-            await ctx.followup.send(embed=embed)
-            return
-        elif not COOLDOWN[author_and_guild][0] == 0:
-            embed = discord.Embed(
-                description=strings["Errors.CooldownBeg"].format(120 - COOLDOWN[author_and_guild][0]),
-                color=discord.Color.red(),
-            )
-            await ctx.followup.send(embed=embed)
-            return
-
-        beg_amount = random.randrange(-10, 36)
-
-        if beg_amount < 0:
-            embed = discord.Embed(
-                description=random.choice(strings["Beg.HappeningsNeg"]).format(beg_amount),
-                color=discord.Color.red(),
-            )
-            users[author_and_guild]["Wallet"] += beg_amount
-        elif beg_amount == 0:
-            embed = discord.Embed(
-                description=random.choice(strings["Beg.HappeningsNeu"]),
-                color=discord.Color.dark_blue(),
-            )
-        else:
-            embed = discord.Embed(
-                description=random.choice(strings["Beg.HappeningsPos"]).format(beg_amount),
-                color=discord.Color.green(),
-            )
-            users[author_and_guild]["Wallet"] += beg_amount
-        await ctx.followup.send(embed=embed)
-
-        with open("Data/economics.json", "w") as economy_file:
-            json.dump(users, economy_file, indent=4)
-
-        while COOLDOWN[author_and_guild][0] != 120:
-            await asyncio.sleep(1)
-            COOLDOWN[author_and_guild][0] += 1
-            continue
-
-        if COOLDOWN[author_and_guild][0] == 120:
-            COOLDOWN[author_and_guild][0] = 0
+        await ctx.respond(embed=embed)
 
     @commands.slash_command(description="Deposits the specified amount to the user's bank")
-    @option(name="amount", description="The amount of credits you wish to deposit to your account", required=True)
-    async def deposit(self, ctx, amount: int):
+    @discord.option(name="amount", description="The amount of credits you wish to deposit to your account",
+                    required=True)
+    async def deposit(self, ctx: discord.ApplicationContext, amount: int):
         await ctx.defer()
 
-        strings = await get_language_strings(ctx)
-
-        with open("Data/economics.json", "r") as economy_file:
-            users = json.load(economy_file)
-
-        author_and_guild = f"{ctx.author.id}-{ctx.guild.id}"
-
-        if author_and_guild not in users:
-            embed = discord.Embed(
-                description=strings["Notes.CreateAccount"],
-                color=discord.Color.blue(),
-            )
-            await ctx.followup.send(embed=embed)
-            return
-        elif users[author_and_guild]["Wallet"] <= 0:
-            embed = discord.Embed(
-                description=strings["Errors.NoDeposit"],
-                color=discord.Color.red(),
-            )
-            await ctx.followup.send(embed=embed)
-            return
-
-        amount = min(max(amount, 0), users[author_and_guild]["Wallet"])
-
-        users[author_and_guild]["Wallet"] -= amount
-        users[author_and_guild]["Bank"] += amount
-
-        with open("Data/economics.json", "w") as economy_file:
-            json.dump(users, economy_file, indent=4)
-
-        embed = discord.Embed(
-            description=strings["Economy.Deposit"].format(amount),
-            color=discord.Color.dark_green(),
-        )
-        await ctx.followup.send(embed=embed)
+        await self.transfer(ctx, amount, deposit=True)
 
     @commands.slash_command(description="Withdraws the specified amount from the user's bank")
-    @option(name="amount", description="The amount of credits you wish to withdraw from your account", required=True)
-    async def withdraw(self, ctx, amount: int):
+    @discord.option(name="amount", description="The amount of credits you wish to withdraw from your account",
+                    required=True)
+    async def withdraw(self, ctx: discord.ApplicationContext, amount: int):
         await ctx.defer()
 
-        strings = await get_language_strings(ctx)
+        await self.transfer(ctx, amount)
 
-        with open("Data/economics.json", "r") as economy_file:
-            users = json.load(economy_file)
+    @commands.slash_command(description="Beg for a chance to gain credits")
+    async def beg(self, ctx: discord.ApplicationContext):
+        await ctx.defer()
 
-        author_and_guild = f"{ctx.author.id}-{ctx.guild.id}"
+        pos_msgs = ["You gain **{}** ¤ after a successful day of begging."]
+        neu_msgs = ["Not a single person stops to give you money, leaving your gains at **{}** ¤."]
+        neg_msgs = ["Another beggar stabs you with a rusty knife, you gain tetanus, but lose **{}** ¤."]
 
-        if author_and_guild not in users:
-            embed = discord.Embed(
-                description=strings["Notes.CreateAccount"],
-                color=discord.Color.blue(),
-            )
-            await ctx.followup.send(embed=embed)
+        amount = random.randint(-20, 50)
+        beg_msg = random.choice(pos_msgs if amount > 0 else neg_msgs if amount < 0 else neu_msgs)
+
+        if not await self.handle_action(ctx, ctx.author.id, amount):
             return
-        elif users[author_and_guild]["Bank"] <= 0:
-            embed = discord.Embed(
-                description=strings["Errors.NoWithdraw"],
-                color=discord.Color.red(),
-            )
-            await ctx.followup.send(embed=embed)
-            return
-
-        amount = min(max(amount, 0), users[author_and_guild]["Bank"])
-
-        users[author_and_guild]["Bank"] -= amount
-        users[author_and_guild]["Wallet"] += amount
-
-        with open("Data/economics.json", "w") as economy_file:
-            json.dump(users, economy_file, indent=4)
 
         embed = discord.Embed(
-            description=strings["Economy.Withdraw"].format(amount),
-            color=discord.Color.dark_green(),
+            description=beg_msg.format(amount),
+            color=discord.Color.green() if amount > 0 else discord.Color.dark_red() if amount < 0 else
+            discord.Color.dark_blue()
         )
-        await ctx.followup.send(embed=embed)
+        await ctx.respond(embed=embed)
 
     @commands.slash_command(description="Rob another user for a chance to gain credits")
-    @option(name="user", description="The user you wish to rob from", required=True)
-    async def rob(self, ctx, user: discord.User):
+    @discord.option(name="user", description="The user you wish to rob from", required=True)
+    async def rob(self, ctx: discord.ApplicationContext, user: discord.User):
         await ctx.defer()
 
-        strings = await get_language_strings(ctx)
-
-        with open("Data/economics.json", "r") as economy_file:
-            users = json.load(economy_file)
-
-        author_and_guild = f"{ctx.author.id}-{ctx.guild.id}"
         victim_and_guild = f"{user.id}-{ctx.guild.id}"
 
-        if author_and_guild not in users:
-            embed = discord.Embed(
-                description=strings["Notes.CreateAccount"],
-                color=discord.Color.blue(),
-            )
-            await ctx.followup.send(embed=embed)
+        pos_msgs = ["You successfully give **{}** the old one-two treatment, and lighten their wallet by **{}** ¤."]
+        neu_msgs = ["You plan of robbing **{}** too long, and the opportunity passes, leaving your gains at **{}** ¤."]
+        neg_msgs = ["You are caught red-handed trying to rob **{}**, and get fined **{}** ¤."]
+
+        amount = random.randint(max(-100, -(self.users[ctx.guild.id][victim_and_guild]["wallet"] // 3)),
+                                self.users[ctx.guild.id][victim_and_guild]["wallet"])
+        rob_msg = random.choice(pos_msgs if amount > 0 else neg_msgs if amount < 0 else neu_msgs)
+
+        if not await self.handle_action(ctx, ctx.author.id, amount, user.id):
             return
-        elif victim_and_guild not in users:
-            embed = discord.Embed(
-                description=strings["Errors.UserNoAccount"],
-                color=discord.Color.red(),
-            )
-            await ctx.followup.send(embed=embed)
-            return
-        elif user.name == ctx.author.name:
-            embed = discord.Embed(
-                description=strings["Errors.RobSelf"],
-                color=discord.Color.red(),
-            )
-            await ctx.followup.send(embed=embed)
-            return
-        elif users[victim_and_guild]["Wallet"] <= 0:
-            embed = discord.Embed(
-                description=strings["Errors.RobBroke"],
-                color=discord.Color.red(),
-            )
-            await ctx.followup.send(embed=embed)
-            return
-        elif not COOLDOWN[author_and_guild][1] == 0:
-            embed = discord.Embed(
-                description=strings["Errors.CooldownRob"].format(120 - COOLDOWN[author_and_guild][1]),
-                color=discord.Color.red(),
-            )
-            await ctx.followup.send(embed=embed)
-            return
-
-        if users[victim_and_guild]["Wallet"] < 250:
-            rob_amount = random.randrange(-50, users[victim_and_guild]["Wallet"] + 1)
-        else:
-            rob_amount = random.randrange(-100, users[victim_and_guild]["Wallet"] + 1)
-
-        if rob_amount > 0:
-            embed = discord.Embed(
-                description=strings["Economy.RobSuccess"].format(rob_amount, user.name),
-                color=discord.Color.green(),
-            )
-            users[author_and_guild]["Wallet"] += rob_amount
-            users[victim_and_guild]["Wallet"] -= rob_amount
-        elif rob_amount == 0:
-            embed = discord.Embed(
-                description=strings["Economy.RobNeutral"].format(user.name),
-                color=discord.Color.dark_blue(),
-            )
-        else:
-            embed = discord.Embed(
-                description=strings["Economy.RobFailure"].format(user.name, rob_amount),
-                color=discord.Color.red(),
-            )
-            await ctx.followup.send(embed=embed)
-
-            users[author_and_guild]["Wallet"] += rob_amount
-        await ctx.followup.send(embed=embed)
-
-        with open("Data/economics.json", "w") as economy_file:
-            json.dump(users, economy_file, indent=4)
-
-        while COOLDOWN[author_and_guild][1] != 120:
-            await asyncio.sleep(1)
-            COOLDOWN[author_and_guild][1] += 1
-            continue
-
-        if COOLDOWN[author_and_guild][1] == 120:
-            COOLDOWN[author_and_guild][1] = 0
-
-    @commands.slash_command(description="Displays the richest users in the guild")
-    @option(name="to", description="The end position of the leaderboard display", required=False)
-    async def leaderboard(self, ctx, to: int = None):
-        await ctx.defer()
-
-        strings = await get_language_strings(ctx)
-
-        leaderboard = {"IDs": [], "SortedUsers": [], "NameAndBalance": {}, "Values": [], "Joined": ""}
-
-        with open("Data/economics.json", "r") as economy_file:
-            users = json.load(economy_file)
-
-        for user in users:
-            if int(user.split("-")[1]) == ctx.guild.id:
-                leaderboard["IDs"].append(user)
-
-        if len(leaderboard["IDs"]) == 0:
-            embed = discord.Embed(
-                description=strings["Economy.LeaderboardNoAccounts"],
-                color=discord.Color.dark_gold(),
-            )
-            try:
-                embed.set_author(name=strings["Economy.Leaderboard"].format(ctx.guild.name),
-                                 icon_url=ctx.guild.icon.url)
-            except AttributeError:
-                embed.set_author(name=strings["Economy.Leaderboard"].format(ctx.guild.name))
-            await ctx.followup.send(embed=embed)
-            return
-        elif to:
-            end_point = min(max(to, 1), len(leaderboard["IDs"]))
-        elif len(leaderboard["IDs"]) > 10:
-            end_point = 11
-        else:
-            end_point = len(leaderboard["IDs"])
-
-        for user in leaderboard["IDs"][:end_point]:
-            fetched_user = await self.bot.fetch_user(int(user.split("-")[0]))
-            leaderboard["NameAndBalance"][fetched_user.name] = users[user]["Wallet"] + users[user]["Bank"]
-
-        leaderboard["SortedUsers"] = sorted(leaderboard["NameAndBalance"].items(), key=lambda x: x[1], reverse=True)
-
-        for index, user in enumerate(leaderboard["SortedUsers"]):
-            leaderboard["Values"].append(f"[**{index + 1}**] {user[0]} - {user[1]} ¤")
-
-            if len(leaderboard["Values"]) >= 3952:
-                break
-
-        leaderboard["Joined"] = "\n".join(leaderboard["Values"])
-        additional_users = len(leaderboard["IDs"]) - len(leaderboard["Values"])
 
         embed = discord.Embed(
-            description=f"{leaderboard['Joined']}\n"
-                        f"{strings['Music.Additional'].format(additional_users) if additional_users else ''}",
-            color=discord.Color.dark_gold(),
+            description=rob_msg.format(user.name, amount),
+            color=discord.Color.green() if amount > 0 else discord.Color.dark_red() if amount < 0 else
+            discord.Color.dark_blue()
+        )
+        await ctx.respond(embed=embed)
+
+    @commands.slash_command(description="Displays the richest users in the guild")
+    @discord.option(name="from", description="The start position of the leaderboard display", required=False)
+    @discord.option(name="to", description="The end position of the leaderboard display", required=False)
+    async def leaderboard(self, ctx: discord.ApplicationContext, from_: int = None, to: int = None):
+        await ctx.defer()
+
+        with open("Data/economics.json", "r") as economy_file:
+            self.users[ctx.guild.id] = json.load(economy_file)
+
+        guild_users = [await self.bot.fetch_user(int(k.split("-")[0])) for k in self.users[ctx.guild.id] if
+                       int(k.split("-")[1]) == ctx.guild.id]
+        user_balances = [(k, await self.get_total_balance(ctx, k.id)) for k in guild_users]
+        user_balances.sort(key=lambda x: x[1], reverse=True)
+
+        from_ = max(1, min(from_, len(guild_users))) if from_ else 1
+        to = max(1, min(to, len(guild_users))) if to else len(guild_users)
+        from_, to = ((from_, to) if from_ < to else (to, from_)) if to != 0 else (from_, to)
+
+        leaderboard_msg = "No one has opened an account in this guild." if not guild_users else \
+            "\n".join([f"[**{i + from_}**] {user.name} - {balance} ¤"
+                       for i, (user, balance) in enumerate(user_balances[from_ - 1:to])])
+        addition_song_count = len(user_balances) - to - 1 + from_
+        leaderboard_msg += f"\n+ **{addition_song_count}** more..." if addition_song_count else ""
+
+        embed = discord.Embed(
+            description=leaderboard_msg,
+            color=discord.Color.dark_gold()
         )
         try:
-            embed.set_author(name=strings["Economy.Leaderboard"].format(ctx.guild.name), icon_url=ctx.guild.icon.url)
+            embed.set_author(name=f"{ctx.guild.name} - Leaderboard", icon_url=ctx.guild.icon.url)
         except AttributeError:
-            embed.set_author(name=strings["Economy.Leaderboard"].format(ctx.guild.name))
-        await ctx.followup.send(embed=embed)
+            embed.set_author(name=f"{ctx.guild.name} - Leaderboard")
+        await ctx.respond(embed=embed)
 
+    @register.before_invoke
+    @unregister.before_invoke
+    @balance.before_invoke
     @beg.before_invoke
+    @deposit.before_invoke
+    @withdraw.before_invoke
     @rob.before_invoke
-    async def ensure_cooldown(self, ctx):
-        author_and_guild = f"{ctx.author.id}-{ctx.guild.id}"
+    @leaderboard.before_invoke
+    async def ensure_dicts(self, ctx: discord.ApplicationContext):
+        if ctx.guild.id not in self.users:
+            with open("Data/economics.json", "r") as economy_file:
+                self.users[ctx.guild.id] = json.load(economy_file)
 
-        if author_and_guild not in COOLDOWN:
-            COOLDOWN[author_and_guild] = [0, 0]
+            self.gui[ctx.guild.id] = {
+                "yes": Button(style=discord.ButtonStyle.success, label="Yes", row=1),
+                "no": Button(style=discord.ButtonStyle.danger, label="No", row=1)
+            }
+            self.views[ctx.guild.id] = View(timeout=None)
+            self.cooldown[ctx.guild.id] = {}
+
+            if ctx.author.id not in self.cooldown[ctx.guild.id]:
+                self.cooldown[ctx.guild.id][ctx.author.id] = {"beg": None, "rob": None}
+
+            for elem in self.gui[ctx.guild.id].keys():
+                self.gui[ctx.guild.id][elem].callback = await self.resolve_gui_callback(ctx, elem)
+                self.views[ctx.guild.id].add_item(self.gui[ctx.guild.id][elem])
 
 
 def setup(bot):

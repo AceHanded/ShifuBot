@@ -1,5 +1,3 @@
-import discord
-import datetime
 import yt_dlp
 import googleapiclient.discovery
 import spotipy
@@ -7,8 +5,10 @@ from spotipy.oauth2 import SpotifyOAuth
 import lyricsgenius
 import sclib
 from dotenv import load_dotenv
-import json
 import os
+import re
+from openai import OpenAI
+from enum import IntEnum
 
 
 load_dotenv()
@@ -26,9 +26,19 @@ class Color:
     UNDERLINE = "\033[4m"
 
 
+class Sources(IntEnum):
+    YOUTUBE = 0
+    SPOTIFY = 1
+    SOUNDCLOUD = 2
+
+
 class Constants:
+    OPENAI = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                  "Version/17.5 Safari/605.1.1")
     SOUNDCLOUD = sclib.SoundcloudAPI()
-    GENIUS = lyricsgenius.Genius(os.getenv("GENIUS_API_KEY"), timeout=10, verbose=False, skip_non_songs=True)
+    GENIUS = lyricsgenius.Genius(os.getenv("GENIUS_API_KEY"), timeout=10, verbose=False, remove_section_headers=True,
+                                 skip_non_songs=True, retries=5)
     YOUTUBE = googleapiclient.discovery.build("youtube", "v3",
                                               developerKey=os.getenv("YOUTUBE_API_KEY"))
     SPOTIFY = spotipy.Spotify(auth_manager=SpotifyOAuth(client_id=os.getenv("SPOTIFY_CLIENT_ID"),
@@ -38,141 +48,103 @@ class Constants:
                                                         username=os.getenv("SPOTIFY_USERNAME")))
     YTDL_FORMAT_OPTIONS = {
         "format": "bestaudio",
-        "outtmpl": "%(extractor)s-%(id)s-%(title)s.%(ext)s",
-        "restrictfilenames": True,
-        "noplaylist": True,
-        "nocheckcertificate": True,
-        "ignoreerrors": False,
-        "logtostderr": False,
+        "no-playlist": True,
+        "no-check-certificates": True,
         "quiet": True,
-        "no_warnings": True,
-        "default_search": "ytsearch1",
-        "source_address": "0.0.0.0",
+        "no-warnings": True,
+        "default-search": "ytsearch1",
         "force-ipv4": True,
         "no-cache-dir": True,
-        "cookies": "cookies.txt",
+        "cookies-from-browser": "firefox",
+        "downloader": "aria2c",
         "use-extractors": "Youtube",
-        "external-downloader": "aria2c",
-        "external-downloader-args": "--min-split-size=1M --max-connection-per-server=16 --max-concurrent-downloads=16"
-                                    " --split=16"
+        "extractor-args": "youtube:formats=dashy;player_client=web;player_skip=configs",
+        "concurrent-fragments": 16
     }
     YTDL = yt_dlp.YoutubeDL(YTDL_FORMAT_OPTIONS)
     CARD_VALUE = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "Jack", "Queen", "King", "Ace"]
     CARD_SUIT = {"Clubs": "♧", "Diamonds": "♢", "Hearts": "♡", "Spades": "♤"}
+    URL_REGEX = re.compile(r"^(?:https?://)?(?:www\.)?\w+\.([a-z]{2,})/?(.*)$", re.IGNORECASE)
+    LIVE_REGEX = re.compile(r"^[(|\[]live[)|\]]$")
+    # TIMESTAMP_REGEX = re.compile(r"^(\d{1,2}):(\d{2}):(\d{2})$|^(\d{1,2}):(\d{2})$")
+    YOUTUBE_URL = "https://www.youtube.com/watch?v={}"
+    YOUTUBE_PLAYLIST_URL = "https://www.youtube.com/playlist?list={}"
+    FILTERS = {
+        "Disabled": None,
+        "Nightcore": '-af "rubberband=pitch={}:tempo=1, aresample=44100"',
+        "BassBoost": '-af "bass=g={}, aresample=44100"',
+        "EarRape": '-af "acrusher=level_in={}:level_out={}:bits=8:mode=log:aa=1, aresample=44100"'
+    }
+    EMOJI_DICT = {
+        Sources.YOUTUBE: "<:youtube:1267269233772073153>",
+        Sources.SPOTIFY: "<:spotify:1267269271390519376>",
+        Sources.SOUNDCLOUD: "<:soundcloud:1267269257423618060>"
+    }
+    ATTACKS = ["a baseball bat", "a crowbar", "their bare fists", "a knife", "a car", "an explosive christmas ornament",
+               "a rock", "their mom", "a T-34", "a concealed shiv", "God's hand"]
+    SCENES = ["Backyard brawl", "Backstreet brawl", "Saloon brawl", "Pizzeria brawl", "Playground brawl", "Grill brawl"]
+    SPOTS = ["back", "knee", "phallus", "head", "face", "neck", "arm", "chest", "ear", "nose", "toe", "buttock"]
 
 
-async def get_language_strings(ctx):
-    with open("Data/settings.json", "r") as settings_file:
-        settings = json.load(settings_file)
+def validate_url(url: str):
+    regex = re.compile(r"^(?:https?://)?(?:[a-z]{0,4}\.)?([a-zA-Z0-9]{1,10})\.(com|be)/.+$", re.IGNORECASE)
+    match = re.match(regex, url)
 
-    try:
-        with open(f"Locales/{settings.get(str(ctx.guild.id), 'english')}.json") as lang_file:
-            strings = json.load(lang_file)
-    except FileNotFoundError:
-        embed = discord.Embed(
-            description=f"**Error:** Language files not detected. Have they been deleted?",
-            color=discord.Color.red(),
-        )
-        await ctx.respond(embed=embed)
-        return
-
-    return strings
+    return match is not None and match.group(1).lower() in ["youtu", "youtube", "spotify", "soundcloud"]
 
 
-async def parse_timestamp(ctx, timestamp: str, no_seek: bool = False):
-    strings = await get_language_strings(ctx)
+def validate_timestamp(timestamp: str):
+    split_timestamp = timestamp.split(":")
 
-    colon_count = timestamp.count(":")
+    if len(split_timestamp) > 3 or any(not part.isdigit() for part in split_timestamp):
+        return False
 
-    if colon_count == 2:
-        hours, minutes, seconds = timestamp.split(":")
-    elif colon_count == 1:
-        hours = "00"
-        minutes, seconds = timestamp.split(":")
-    elif colon_count == 0:
-        hours, minutes, seconds = "00", "00", timestamp
+    return True
+
+
+def seconds_to_timestamp(seconds: int):
+    hours, minute_remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(minute_remainder, 60)
+
+    return f"{hours}:{minutes:02}:{seconds:02}" if hours else f"{minutes}:{seconds:02}"
+
+
+def timestamp_to_seconds(timestamp: str):
+    if not timestamp:
+        return None
+
+    split_timestamp = timestamp.split(":")
+
+    if len(split_timestamp) == 3:
+        h, m, s = map(int, split_timestamp)
+        seconds = h * 3600 + m * 60 + s
+    elif len(split_timestamp) == 2:
+        m, s = map(int, split_timestamp)
+        seconds = m * 60 + s
     else:
-        embed = discord.Embed(
-            description=strings["Notes.InvalidTimestamp"].format(
-                strings["Utils.DefaultingTimestamp"] if not no_seek else ""),
-            color=discord.Color.blue(),
-        )
-        await ctx.respond(embed=embed)
+        seconds = int(split_timestamp[0])
 
-        if no_seek:
-            return
-        hours, minutes, seconds = "00", "00", "00"
-
-    if not (hours.isdigit() and minutes.isdigit() and seconds.isdigit()):
-        embed = discord.Embed(
-            description=strings["Notes.InvalidTimestamp"].format(
-                strings["Utils.DefaultingTimestamp"] if not no_seek else ""),
-            color=discord.Color.blue(),
-        )
-        await ctx.respond(embed=embed)
-
-        if no_seek:
-            return
-        hours, minutes, seconds = "00", "00", "00"
-
-    return (int(hours) * 3600) + (int(minutes) * 60) + int(seconds)
+    return seconds
 
 
-def format_duration(seconds: int, compare_to: int = None, use_milliseconds: bool = False):
-    if seconds is None:
+def format_timestamp(timestamp: str, comparison: int = None):
+    if timestamp == "0:00":
         return "Live"
 
-    if not compare_to:
-        compare_to = seconds
+    split_timestamp = timestamp.split(":")
 
-    if not use_milliseconds:
-        compare_value = 3600
+    if len(split_timestamp) == 3:
+        h, m, s = map(int, split_timestamp)
+    elif len(split_timestamp) == 2:
+        h = 0
+        m, s = map(int, split_timestamp)
     else:
-        compare_value = 3600000
-        seconds //= 1000
+        h, m = 0, 0
+        s = int(split_timestamp[0])
 
-    if compare_to >= compare_value:
-        return f"{datetime.timedelta(seconds=seconds)}"
+    seconds = h * 3600 + m * 60 + s
 
-    return f"{seconds // 60:02d}:{seconds % 60:02d}"
+    if comparison and seconds > comparison:
+        seconds = comparison
 
-
-async def connect_handling(ctx, play_command=False):
-    strings = await get_language_strings(ctx)
-
-    try:
-        channel = ctx.author.voice.channel
-    except AttributeError:
-        embed = discord.Embed(
-            description=strings["Notes.ConnectToChannel"],
-            color=discord.Color.blue(),
-        )
-        await ctx.followup.send(embed=embed)
-        return
-
-    if ctx.voice_client is None:
-        embed = discord.Embed(
-            description=strings["Utils.Connecting"].format(channel.id),
-            color=discord.Color.dark_green()
-        )
-        await ctx.followup.send(embed=embed)
-
-        await channel.connect()
-        await ctx.guild.change_voice_state(channel=channel, self_mute=False, self_deaf=True)
-    elif channel != ctx.voice_client.channel:
-        embed = discord.Embed(
-            description=strings["Utils.Moving"].format(channel.id),
-            color=discord.Color.dark_green()
-        )
-        await ctx.followup.send(embed=embed)
-
-        await ctx.voice_client.move_to(channel)
-        await ctx.guild.change_voice_state(channel=channel, self_mute=False, self_deaf=True)
-    elif ctx.voice_client and channel == ctx.voice_client.channel and not play_command:
-        embed = discord.Embed(
-            description=strings["Errors.AlreadyConnected"].format(channel),
-            color=discord.Color.red()
-        )
-        await ctx.followup.send(embed=embed)
-
-    return channel
+    return seconds_to_timestamp(seconds)

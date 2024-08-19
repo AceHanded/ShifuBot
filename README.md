@@ -15,6 +15,29 @@ ShifuBot has come a long way in the few years that it has been in development, a
 ## Changelog
 
 <details>
+    <summary>v1.0.6</summary>
+    
+    - Rewrote everything.
+      * More concise, yet performant code.
+      * Changed the elapsed duration handling from a counter-based implementation to one using the `time` library.
+      * Changed the way the `nightcore` filter works.
+      * Fixed remaining concurrency issues.
+
+    - Added a select menu for suggested tracks in the `play` command.
+
+    - Added an `autoplay` command that automatically adds and plays songs in queue.
+
+    - Added parameter `previous` to the `view` command, which makes it possible to view the songs in previous queue.
+
+    - Added parameter `instant` to the `replay` command, which makes it possible to replay the given song instantly.
+
+    - Added parameter `from_` to the `leaderboard` command, which makes it possible to specify the starting position of the leaderboard display.
+
+    - Removed support for custom languages (at least for now).
+
+    - Removed the `settings` and `thought` commands.
+</details>
+<details>
     <summary>v1.0.5</summary>
     
     - Fixed an issue that caused the `seek` and `filter` commands to work extremely slowly, especially with longer songs.
