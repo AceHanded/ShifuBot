@@ -278,10 +278,15 @@ class Music(commands.Cog):
             seconds_to_timestamp(int(result["duration"]["secondsText"])) if is_url else result["duration"],
             result["channel"]["name"], result["channel"]["id"], timestamp_to_seconds(start_at)
         )
-        self.queue[ctx.guild.id].append(player_entry)
+
+        if not insert:
+            self.queue[ctx.guild.id].append(player_entry)
+        else:
+            self.queue[ctx.guild.id].insert(insert, player_entry)
+
         dur = player_entry.duration
 
-        if ctx.voice_client.is_playing() and not insert:
+        if (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()) and not insert:
             embed = discord.Embed(
                 description=f"**{Constants.EMOJI_DICT[type_]} Added to queue:** "
                             f"[{player_entry.title}]({player_entry.url}) "
@@ -290,7 +295,7 @@ class Music(commands.Cog):
                 color=discord.Color.dark_green()
             )
             await ctx.respond(embed=embed)
-        elif ctx.voice_client.is_playing() and insert:
+        elif (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()) and insert:
             embed = discord.Embed(
                 description=f"**{Constants.EMOJI_DICT[type_]} Inserted to queue:** "
                             f"[{player_entry.title}]({player_entry.url}) "
@@ -833,7 +838,7 @@ class Music(commands.Cog):
 
         await self.populate_select_menu(ctx)
 
-        if not ctx.voice_client.is_playing():
+        if not (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()):
             self.booleans[ctx.guild.id]["first"] = True
             dur = self.queue[ctx.guild.id][0].duration
 
@@ -1365,7 +1370,7 @@ class Music(commands.Cog):
             return
 
         from_ = len(self.previous[ctx.guild.id]) if not from_ else max(1, min(from_, len(self.previous[ctx.guild.id])))
-        insert = 1 if instant else len(self.queue[ctx.guild.id]) if not insert else \
+        insert = 1 if instant else max(1, len(self.queue[ctx.guild.id])) if not insert else \
             max(1, min(insert, len(self.queue[ctx.guild.id])))
 
         previous_song = self.previous[ctx.guild.id].pop(from_ - 1)

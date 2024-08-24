@@ -15,6 +15,13 @@ ShifuBot has come a long way in the few years that it has been in development, a
 ## Changelog
 
 <details>
+    <summary>v1.0.7</summary>
+    
+    - Fixed an issue that caused the `insert` parameter of the `play` command to not function.
+
+    - Fixed an issue that caused the current song to start over when a song was added to the queue, when the current one was paused.
+</details>
+<details>
     <summary>v1.0.6</summary>
     
     - Rewrote everything.
