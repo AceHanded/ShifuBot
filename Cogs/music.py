@@ -4,7 +4,7 @@ import discord
 from discord.ext import commands
 from discord.ui import Button, Select, View
 from pytubefix import YouTube, Playlist
-from pytubefix.exceptions import AgeRestrictedError
+from pytubefix.exceptions import AgeRestrictedError, VideoUnavailable
 import asyncio
 import re
 import random
@@ -221,9 +221,11 @@ class Music(commands.Cog):
 
     async def cleanup(self, ctx: any):
         try:
-            await self.messages[ctx.guild.id]["main"].edit(view=None)
-        except (discord.NotFound, discord.HTTPException, AttributeError):
-            pass
+            channel = self.bot.get_guild(int(ctx.guild.id)).get_channel(self.text_channel[ctx.guild.id])
+            message = await channel.fetch_message(self.messages[ctx.guild.id]["main"].id)
+            await message.edit(view=None)
+        except (discord.NotFound, discord.HTTPException, AttributeError) as e:
+            print("Exception occurred during cleanup:", e)
 
         for dictionary in [self.queue, self.previous, self.booleans, self.filters, self.volume, self.elapsed_time,
                            self.text_channel, self.loop, self.messages, self.button_invoker, self.gui, self.views,
@@ -239,7 +241,7 @@ class Music(commands.Cog):
         try:
             source = await PytubeSource.from_url(self.queue[ctx.guild.id][0].url, loop=self.bot.loop, filter_=filter_,
                                                  start_at=start)
-        except (AgeRestrictedError, AttributeError):
+        except (AgeRestrictedError, VideoUnavailable, AttributeError):
             source = await YTDLSource.from_url(self.queue[ctx.guild.id][0].url, loop=self.bot.loop, stream=True,
                                                filter_=filter_, start_at=start)
 
@@ -267,7 +269,7 @@ class Music(commands.Cog):
                     color=discord.Color.red()
                 )
                 await ctx.respond(embed=embed)
-                return
+                return False
 
             result = search["result"][0] if not ignore_live else \
                 next((item for item in search["result"] if not re.match(Constants.LIVE_REGEX, item["title"].lower())),
@@ -304,6 +306,8 @@ class Music(commands.Cog):
                 color=discord.Color.dark_green()
             )
             await ctx.respond(embed=embed)
+
+        return True
 
     async def playlist_addition_handling(self, ctx: discord.ApplicationContext, queries: list[str], title: str,
                                          url: str, has_urls: bool = False, ignore_live: bool = False,
@@ -726,6 +730,7 @@ class Music(commands.Cog):
         self.text_channel[ctx.guild.id] = ctx.channel.id
 
         insert = max(1, min(insert, len(self.queue[ctx.guild.id]))) if insert else None
+        add_success = True
 
         if start_at and not validate_timestamp(start_at):
             embed = discord.Embed(
@@ -810,15 +815,17 @@ class Music(commands.Cog):
                 except IndexError:
                     spotify_query = spotify_result["name"]
 
-                await self.song_addition_handling(ctx, spotify_query, insert=insert, ignore_live=ignore_live,
-                                                  start_at=start_at, type_=Sources.SPOTIFY)
+                add_success = await self.song_addition_handling(ctx, spotify_query, insert=insert,
+                                                                ignore_live=ignore_live, start_at=start_at,
+                                                                type_=Sources.SPOTIFY)
             elif "soundcloud.com/" in query:
                 soundcloud_result = Constants.SOUNDCLOUD.resolve(query)
 
                 if isinstance(soundcloud_result, SCTrack):
                     soundcloud_query = f"{soundcloud_result.artist} - {soundcloud_result.title}"
-                    await self.song_addition_handling(ctx, soundcloud_query, insert=insert, ignore_live=ignore_live,
-                                                      start_at=start_at, type_=Sources.SOUNDCLOUD)
+                    add_success = await self.song_addition_handling(ctx, soundcloud_query, insert=insert,
+                                                                    ignore_live=ignore_live, start_at=start_at,
+                                                                    type_=Sources.SOUNDCLOUD)
                 elif isinstance(soundcloud_result, SCPlaylist):
                     playlist_entries = [f"{track.artist} - {track.title}" for track in soundcloud_result]
                     await self.playlist_addition_handling(ctx, playlist_entries, soundcloud_result.title, query,
@@ -834,7 +841,11 @@ class Music(commands.Cog):
             else:
                 await self.song_addition_handling(ctx, query, is_url=True, insert=insert, start_at=start_at)
         else:
-            await self.song_addition_handling(ctx, query, insert=insert, ignore_live=ignore_live, start_at=start_at)
+            add_success = await self.song_addition_handling(ctx, query, insert=insert, ignore_live=ignore_live,
+                                                            start_at=start_at)
+
+        if not add_success:
+            return
 
         await self.populate_select_menu(ctx)
 
@@ -1461,12 +1472,13 @@ class Music(commands.Cog):
                 description=f"**☲ {song.title} Lyrics**\n\n{formatted_lyrics}",
                 color=discord.Color.dark_gold(),
             )
+            await ctx.respond(embed=embed)
         except discord.HTTPException:
             embed = discord.Embed(
                 description=f"**☲ {song.title} Lyrics**\n\nLyrics too long for Discord. [Find them here.]({song.url})",
                 color=discord.Color.dark_gold(),
             )
-        await ctx.respond(embed=embed)
+            await ctx.respond(embed=embed)
 
     @commands.slash_command(name="loop", description="Loops either the song or the entire queue")
     @discord.option(name="mode", description="The loop mode you wish to use", choices=["Disabled", "Single", "Queue"],

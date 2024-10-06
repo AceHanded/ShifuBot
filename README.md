@@ -15,6 +15,15 @@ ShifuBot has come a long way in the few years that it has been in development, a
 ## Changelog
 
 <details>
+    <summary>v1.0.8</summary>
+    
+    - Fixed an error with the select menu, when a song was not found.
+
+    - Fixed an error with the `lyrics` command, when the lyrics were too long for Discord.
+
+    - Fixed an issue that caused the buttons of the `play` command to not be cleared properly when the bot disconnects.
+</details>
+<details>
     <summary>v1.0.7</summary>
     
     - Fixed an issue that caused the `insert` parameter of the `play` command to not function.
