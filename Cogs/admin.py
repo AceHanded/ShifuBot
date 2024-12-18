@@ -281,10 +281,50 @@ class Admin(commands.Cog):
         )
         await ctx.followup.send(embed=embed, view=self.views[ctx.guild.id])
 
+    @commands.slash_command(description="Modifies guild-specific settings")
+    @discord.option(name="speech_recognition",
+                    description="Enables speech recognition, by toggling the microphone on / off in quick succession",
+                    choices=[True, False], required=False)
+    @discord.option(name="language",
+                    description="Specifies the speech recognition language in IETF format (i.e. en-US, fi-FI, ...)",
+                    required=False)
+    @commands.has_permissions(administrator=True)
+    async def settings(self, ctx: discord.ApplicationContext, speech_recognition: bool = None, language: str = None):
+        with open("Data/settings.json", "r") as settings_file:
+            settings = json.load(settings_file)
+
+        guild_id = str(ctx.guild.id)
+
+        if guild_id not in settings:
+            settings[guild_id] = {
+                "speech_recognition": True,
+                "language": "en-US"
+            }
+        else:
+            settings[guild_id] = {
+                "speech_recognition": speech_recognition or settings[guild_id]["speech_recognition"],
+                "language": language or settings[guild_id]["language"]
+            }
+
+        with open("Data/settings.json", "w") as settings_file:
+            json.dump(settings, settings_file, indent=4)
+
+        embed = discord.Embed(
+            description=f"**Speech recognition** - {settings[guild_id]['speech_recognition']}\n"
+                        f"**Language** - {settings[guild_id]['language']}",
+            color=discord.Color.dark_gold()
+        )
+        try:
+            embed.set_author(name=f"{ctx.guild.name} - Settings", icon_url=ctx.guild.icon.url)
+        except AttributeError:
+            embed.set_author(name=f"{ctx.guild.name} - Settings")
+        await ctx.response.send_message(embed=embed, ephemeral=True)
+
     @role_assign.error
     @joinrole.error
     @msgdel.error
     @reset_economy.error
+    @settings.error
     async def command_permission_error(self, ctx: discord.ApplicationContext, error: any):
         if isinstance(error, CheckFailure):
             embed = discord.Embed(

@@ -15,6 +15,22 @@ ShifuBot has come a long way in the few years that it has been in development, a
 ## Changelog
 
 <details>
+  <summary>v1.0.9</summary>
+    
+    - Added voice commands.
+    * Enabled by muting and unmuting the microphone, after which, the bot listens to speech for 5 seconds.
+    * Supports English and Finnish.
+    * Current commands are `play | toista`, `skip | seuraava`, `pause | pysäytä` and `disconnect | painu vittuun`.
+
+    - Re-added the `settings` command, which allows toggling of speech recognition, as well as its language.
+
+    - Modified the `play` command's main embed to dynamically change when the queue changes.
+
+    - Fixed appearance of duplicates in the suggested tracks in the `play` command.
+    
+    - Cleaned up the `lyrics` command due to changes in the `lyricsgenius` library.
+</details>
+<details>
     <summary>v1.0.8</summary>
     
     - Fixed an error with the select menu, when a song was not found.
