@@ -1,226 +1,149 @@
-import discord
-from discord.ext import commands, tasks
-from discord.ui import Select, View
-import psutil
-from datetime import datetime
-from Cogs.utils import Color
 import json
-import os
-from dotenv import load_dotenv
+import discord
+import discord.utils
+from datetime import datetime
+from cogs.basic import RoleView
+from dotenv import dotenv_values
+from discord.ext import commands, tasks
+from pytse.utils import close_aiohttp_session
+from utils import get_performance_metrics, EmbedColor, load_roles, TerminalColor as C
 
+class ShifuBot(commands.Bot):
+    async def close(self) -> None:
+        music_cog = self.get_cog("Music")
 
-load_dotenv()
+        if music_cog is not None:
+            queue = getattr(music_cog, "queue", {})
 
+            for queue_id in queue:
+                play_msg = queue[queue_id].messages["play"]
+                if play_msg: await play_msg.edit(view=None)
 
-SELECT = {}
+        await close_aiohttp_session()
+        await super().close()
 
-bot = commands.Bot(command_prefix="€", case_insensitive=True, help_command=None, intents=discord.Intents.default())
-cogs = ["music", "basic", "admin", "economy", "game"]
+config = dotenv_values(".env")
+intents = discord.Intents.default() + discord.Intents.members + discord.Intents.message_content
+bot = ShifuBot(command_prefix="€", case_insensitive=True, help_command=None, intents=intents)
+cogs = ["basic", "music"]
+active_guilds = []
 
 for cog in cogs:
-    bot.load_extension(f"Cogs.{cog}")
+    bot.load_extension(f"cogs.{cog}")
 
+async def _update_select_menus() -> tuple[list[str], list[str]]:
+    roles = load_roles()
+    valid, invalid = [], []
 
-async def role_callback(interaction: discord.Interaction):
-    member = bot.get_guild(interaction.guild_id).get_member(interaction.user.id)
-
-    assigned_roles, removed_roles, unassigned_roles = [], [], []
-    unselected_options = [option_.label for option_ in SELECT[str(interaction.guild.id)].options if
-                          option_.value not in SELECT[str(interaction.guild.id)].values]
-    options = set(SELECT[str(interaction.guild.id)].values) | set(unselected_options)
-
-    for option in options:
-        role = discord.utils.get(interaction.guild.roles, name=option)
+    for guild_id in roles:
+        if not roles[guild_id]["assign"]: continue
 
         try:
-            if option in SELECT[str(interaction.guild.id)].values and role not in member.roles:
-                await member.add_roles(role)
-                assigned_roles.append(f"`{option}`")
-            elif option in unselected_options and role in member.roles:
-                await member.remove_roles(role)
-                removed_roles.append(f"`{option}`")
-        except discord.Forbidden:
-            unassigned_roles.append(f"`{option}`")
+            assign = roles[guild_id]["assign"]
+            guild = bot.get_guild(int(guild_id))
 
-    if assigned_roles or removed_roles or unassigned_roles:
-        joined_assigned = "\n".join(assigned_roles)
-        joined_removed = "\n".join(removed_roles)
-        joined_unassigned = "\n".join(unassigned_roles)
+            assert guild
 
-        roles_assigned_message = f"You have **assigned** the following roles to yourself:\n{joined_assigned}\n"
-        roles_removed_message = f"You have **removed** the following roles from yourself:\n{joined_removed}\n"
-        roles_unassigned_message = (f"The following roles could not be accessed due to permission issues:\n"
-                                    f"{joined_unassigned}\n\nPlease ensure that the bot has the `Manage Roles` "
-                                    f"permission.")
+            channel = guild.get_channel(assign["channel_id"])
 
-        embed = discord.Embed(
-            description=f"{roles_assigned_message if assigned_roles else ''}"
-                        f"{roles_removed_message if removed_roles else ''}"
-                        f"{roles_unassigned_message if unassigned_roles else ''}",
-            color=discord.Color.dark_green() if not unassigned_roles else discord.Color.red()
-        )
-    else:
-        embed = discord.Embed(
-            description="No changes made to roles.",
-            color=discord.Color.dark_green()
-        )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+            if isinstance(channel, discord.TextChannel):
+                message = await channel.fetch_message(assign["message_id"])
+                
+                proper_roles = [discord.utils.get(guild.roles, id=role_id) for role_id in assign["options"]]
+                options = [discord.SelectOption(label=role.name[:100], value=str(role.id)) for role in proper_roles if role]
+                await message.edit(view=RoleView(options))
 
-
-async def update_select_menus():
-    with open("Data/messages.json", "r") as message_file:
-        messages = json.load(message_file)
-
-    valid_message_guilds, invalid_message_guilds = [], []
-    for guild_id in messages:
-        try:
-            select = Select(placeholder="Roles...", options=[], min_values=0)
-
-            for i, role in enumerate(messages[guild_id]["opts"]):
-                select.callback = role_callback
-                select.add_option(label=role, value=role, description=f"{i + 1} - {role}")
-
-            select.max_values = len(messages[guild_id]["opts"]) if len(messages[guild_id]["opts"]) > 0 else 1
-
-            view = View(timeout=None)
-            view.add_item(select)
-
-            channel = bot.get_guild(int(guild_id)).get_channel(messages[guild_id]["channel_id"])
-            message = await channel.fetch_message(messages[guild_id]["message_id"])
-            await message.edit(view=view)
-
-            SELECT[guild_id] = select
-            valid_message_guilds.append(guild_id)
-        except discord.NotFound:
-            invalid_message_guilds.append(guild_id)
+                valid.append(guild_id)
+        except (discord.HTTPException, discord.NotFound):
+            invalid.append(guild_id)
             continue
 
-    for guild_id in invalid_message_guilds:
-        del messages[guild_id]
+    for guild_id in invalid:
+        roles[guild_id]["assign"] = {}
 
-    with open("Data/messages.json", "w") as message_file:
-        json.dump(messages, message_file, indent=4)
+    with open("./data/roles.json", "w", encoding="utf-8") as f:
+        json.dump(roles, f, indent=4)
 
-    return len(valid_message_guilds), len(invalid_message_guilds)
-
+    return valid, invalid
 
 @bot.slash_command(description="Loads the specified cog")
-@discord.option(name="extension", description="The extension to handle", required=True, choices=cogs)
+@discord.option(name="cog", description="The cog to load", required=True, choices=cogs)
 @commands.is_owner()
-async def load(ctx: discord.ApplicationContext, extension: str):
-    bot.load_extension(f"Cogs.{extension}")
+async def load(ctx: discord.ApplicationContext, cog: str):
+    bot.load_extension(f"cogs.{cog}")
 
     embed = discord.Embed(
-        description=f"Cog `{extension}` loaded successfully.",
-        color=discord.Color.dark_green()
+        description=f"Cog `{cog}` loaded successfully.",
+        color=EmbedColor.GREEN
     )
     await ctx.response.send_message(embed=embed, ephemeral=True)
-
 
 @bot.slash_command(description="Unloads the specified cog")
-@discord.option(name="extension", description="The extension to handle", required=True, choices=cogs)
+@discord.option(name="cog", description="The cog to unload", required=True, choices=cogs)
 @commands.is_owner()
-async def unload(ctx: discord.ApplicationContext, extension: str):
-    bot.unload_extension(f"Cogs.{extension}")
+async def unload(ctx: discord.ApplicationContext, cog: str):
+    bot.unload_extension(f"cogs.{cog}")
 
     embed = discord.Embed(
-        description=f"Cog `{extension}` unloaded successfully.",
-        color=discord.Color.dark_green()
+        description=f"Cog `{cog}` unloaded successfully.",
+        color=EmbedColor.GREEN
     )
     await ctx.response.send_message(embed=embed, ephemeral=True)
-
 
 @bot.slash_command(description="Reloads the specified cog")
-@discord.option(name="extension", description="The extension to handle", required=True, choices=cogs)
+@discord.option(name="cog", description="The cog to reload", required=True, choices=cogs)
 @commands.is_owner()
-async def reload(ctx: discord.ApplicationContext, extension: str):
-    bot.reload_extension(f"Cogs.{extension}")
+async def reload(ctx: discord.ApplicationContext, cog: str):
+    bot.reload_extension(f"cogs.{cog}")
 
     embed = discord.Embed(
-        description=f"Cog `{extension}` reloaded successfully.",
-        color=discord.Color.dark_green()
+        description=f"Cog `{cog}` reloaded successfully.",
+        color=EmbedColor.GREEN
     )
     await ctx.response.send_message(embed=embed, ephemeral=True)
-
-
-@bot.slash_command(description="Displays performance statistics")
-async def perfstat(ctx: discord.ApplicationContext):
-    from Cogs.music import QUEUE_LIST
-
-    ram = psutil.virtual_memory()[3] / 1000000000
-    ramt = psutil.virtual_memory().total / 1000000000
-    ramp = round(ram / ramt, 3) * 100
-    cpu = psutil.cpu_percent(1)
-    current_time = datetime.now().strftime("%H:%M:%S")
-
-    embed = discord.Embed(
-        description=f"**Total guilds:** {len(bot.guilds)}\n**Currently connected to:** {len(QUEUE_LIST)}\n"
-                    f"**RAM:** {ram:.4f} ({ramp:.1f}) / {ramt:.4f} GB (100.0 %)\n**CPU:** {cpu} / 100.0 %",
-        color=discord.Color.dark_gold()
-    )
-    embed.set_footer(text=f"Requested at: {current_time}")
-    await ctx.response.send_message(embed=embed, ephemeral=True)
-
 
 @tasks.loop(minutes=5)
 async def resource_display():
-    from Cogs.music import QUEUE_LIST
+    global active_guilds
 
-    queues = [bot.get_guild(guild_id).name for guild_id in QUEUE_LIST]
-    queues_amount = len(queues)
-    queues_joined = ", ".join(queues)
-    ram = psutil.virtual_memory()[3] / 1000000000
-    ramt = psutil.virtual_memory().total / 1000000000
-    ramp = round(ram / ramt, 3) * 100
-    cpu = psutil.cpu_percent(1)
-    current_time = datetime.now().strftime("%H:%M:%S")
+    ram_total, ram_usage, ram_percent, cpu, guilds = get_performance_metrics(bot)
+    ram_color = C.GREEN if ram_percent < 33.3 else C.YELLOW if ram_percent < 66.7 else C.RED
+    cpu_color = C.GREEN if cpu < 33.3 else C.YELLOW if cpu < 66.7 else C.RED
+    print(f"[{C.CYAN}{datetime.now().strftime('%X')}{C.END}] ShifuBot connected to {C.GREEN}{len(guilds)}{C.END} guild(s): {C.GREEN}{', '.join(guilds)}{C.END}\nRAM: {ram_color}{ram_usage} ({ram_percent}){C.END} / {ram_total} GiB (100.0 %)\nCPU: {cpu_color}{cpu}{C.END} / 100.0 %")
 
-    print(f"[{Color.CYAN}{current_time}{Color.END}] ShifuBot currently connected to {Color.GREEN}{queues_amount}"
-          f"{Color.END} guild(s): {Color.GREEN}{queues_joined}{Color.END}\n- RAM usage: "
-          f"{Color.GREEN if ramp < 33.3 else Color.YELLOW if 33.3 < ramp < 67.7 else Color.RED}{ram:.4f} ({ramp:.1f})"
-          f"{Color.END} / {ramt:.4f} GB (100.0 %)\n- CPU usage: "
-          f"{Color.GREEN if cpu < 33.3 else Color.YELLOW if 33.3 < cpu < 67.7 else Color.RED}{cpu}{Color.END} "
-          f"/ 100.0 %")
+@bot.event
+async def on_member_join(member: discord.Member):
+    data = load_roles()
 
+    if data.get(str(member.guild.id)):
+        try:
+            role = discord.utils.get(member.guild.roles, id=data[str(member.guild.id)])
+            if role: await member.add_roles(role)
+        except (AttributeError, discord.Forbidden) as e:
+            print("Error occurred while applying join role:", e)
 
 @bot.event
 async def on_message(msg: discord.Message):
+    assert bot.user
+
     if msg.content == bot.user.mention:
         embed = discord.Embed(
-            description="Use the command `/help` to get started.",
-            color=discord.Color.dark_gold(),
+            description="Get started by using the </help:1372991283169202253> command.",
+            color=EmbedColor.YELLOW
         )
         await msg.channel.send(embed=embed)
 
-
-@bot.event
-async def on_member_join(member):
-    with open("Data/joinroles.json", "r") as role_file:
-        roles = json.load(role_file)
-
-    if member.guild.id in roles:
-        try:
-            await member.add_roles(discord.utils.get(member.guild.roles, name=roles[member.guild.id]))
-            print(f"[{Color.CYAN}{datetime.now().strftime('%H:%M:%S')}{Color.END}] A new member has joined "
-                  f"{Color.GREEN}{bot.get_guild(member.guild.id)}{Color.END} and was assigned the role: "
-                  f"{Color.MAGENTA}{roles[member.guild.id].name}{Color.END}")
-        except (AttributeError, discord.Forbidden) as e:
-            print(e)
-
-
 @bot.event
 async def on_ready():
-    print(f"{bot.user} ({bot.user.id}) initialized!\n-----")
+    assert bot.user
 
-    valid, invalid = await update_select_menus()
-
-    print(f"Role menus initialized! ({Color.GREEN}{valid} updates{Color.END}) "
-          f"({Color.RED}{invalid} removals{Color.END})")
+    print("Initializing role menus...")
+    valid, invalid = await _update_select_menus()
+    print(f"{C.GREEN}{len(valid)}{C.END} updates, {C.RED}{len(invalid)}{C.END} removals")
 
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="tracks | /help"))
+    resource_display.start()
+    print(f"{bot.user} ({bot.user.id}) initialized!\n-----")
 
-    if not resource_display.is_running():
-        resource_display.start()
-
-
-bot.run(os.getenv("BOT_TOKEN"))
+if __name__ == "__main__":
+    bot.run(config["TOKEN"])

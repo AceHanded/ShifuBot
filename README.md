@@ -15,12 +15,33 @@ ShifuBot has come a long way in the few years that it has been in development, a
 ## Changelog
 
 <details>
+    <summary>v1.1.0</summary>
+    
+    - Rewrote everything, again.
+      * Better modularized code.
+      * Some improvements to performance, error handling and resource management.
+
+    - Added support for essentially all sites supported by yt-dlp.
+
+    - Added a `play_file` command, which allows audio to be played from a file.
+
+    - Added a `repair` command, which aims to repair the voice state of the bot.
+
+    - Modified the `settings` command to include user-specific settings instead of guild-specific ones.
+      * Parameter `default_search` specifies, which site is used when searching for songs via keywords.
+      * Parameter `speech_recognition` specifies, whether or not speech recognition is active for the given user.
+
+    - Added 2 new audio filter options to the `filter` command: `Doomer` and `8D`.
+
+    - Removed all commands from the Economy and Game categories, as well as some from the Basic category.
+</details>
+<details>
   <summary>v1.0.9</summary>
     
     - Added voice commands.
-    * Enabled by muting and unmuting the microphone, after which, the bot listens to speech for 5 seconds.
-    * Supports English and Finnish.
-    * Current commands are `play | toista`, `skip | seuraava`, `pause | pysäytä` and `disconnect | painu vittuun`.
+      * Enabled by muting and unmuting the microphone, after which, the bot listens to speech for 5 seconds.
+      * Supports English and Finnish.
+      * Current commands are `play | toista`, `skip | seuraava`, `pause | pysäytä` and `disconnect | painu vittuun`.
 
     - Re-added the `settings` command, which allows toggling of speech recognition, as well as its language.
 

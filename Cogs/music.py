@@ -1,753 +1,170 @@
-from youtubesearchpython.__future__ import Video
-from youtubesearchpython import VideosSearch
-import discord
-from discord.ext import commands
-from discord.ui import Button, Select, View
-from discord.sinks import Sink
-from pytubefix import YouTube, Playlist
-from pytubefix.exceptions import AgeRestrictedError, VideoUnavailable
-import asyncio
-import io
-import os
 import re
-import json
+import copy
+import math
 import time
-import wave
+import pytse
 import random
-from sclib import Track as SCTrack, Playlist as SCPlaylist
-from spotipy.exceptions import SpotifyException
-import requests
-from requests_html import HTMLSession
-import googleapiclient.errors
+import aiohttp
+import asyncio
+import discord
+import subprocess
+import lyricsgenius
 import speech_recognition
+from discord.ext import commands
+from dotenv import dotenv_values
+from typing import cast, Awaitable, Callable
+from pytubefix.exceptions import LiveStreamError, RegexMatchError, VideoUnavailable
 from speech_recognition.recognizers import google
-from Cogs.utils import (Constants, Sources, seconds_to_timestamp, timestamp_to_seconds,
-                        format_timestamp, validate_timestamp, validate_url)
+from utils import AttachmentSource, ByteSink, EmbedColor, Emoji, format_duration, load_settings, parse_duration, PlayerEntry, Queue, YTDLSource
 
+class PlayMessageMenu(discord.ui.Select):
+    def __init__(self, options: list[discord.SelectOption], disabled: bool, music: "Music"):
+        super().__init__(custom_id="play", placeholder="Suggested...", min_values=1, max_values=1, options=options or [discord.SelectOption(label="Loading...", value="None")], disabled=disabled, row=1)
+        self.music = music
 
-QUEUE_LIST = []
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
 
+        assert interaction.guild
 
-class PytubeSource(discord.PCMVolumeTransformer):
-    def __init__(self, source: any, *, data: any, volume: float = 0.50):
-        super().__init__(source, volume)
-        self.data = data
+        command = cast(Callable[..., Awaitable[None]], getattr(self.music, str(self.custom_id), None))
+        queue = self.music.queue[interaction.guild.id]
+        cctx = copy.copy(queue.ctx)
+        setattr(cctx, "_request_type", "suggestion")
 
-    @classmethod
-    async def from_url(cls, url: str, *, loop: any = None, filter_: str = None, start_at: int = None):
-        ffmpeg_options = {"before_options": f"{f'-ss {start_at}' if start_at else ''} "
-                                            f"-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-                          "options": f"{f'-vn {filter_}' if filter_ else ''}"}
+        await command(cctx, self.values[0])
 
-        def get_youtube_audio_url(url_: str):
-            yt = YouTube(url_, use_oauth=False, allow_oauth_cache=False)
-            audio_stream = yt.streams.filter(only_audio=True).first()
-            return audio_stream.url
+class PlayMessageButton(discord.ui.Button):
+    def __init__(self, style: discord.ButtonStyle, disabled: bool, custom_id: str, emoji: str, row: int, music: "Music"):
+        super().__init__(style=style, disabled=disabled, custom_id=custom_id, emoji=emoji, row=row)
+        self.music = music
 
-        loop = loop or asyncio.get_event_loop()
-        audio_url = await loop.run_in_executor(None, lambda: get_youtube_audio_url(url))
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
 
-        return cls(discord.FFmpegPCMAudio(audio_url, **ffmpeg_options), data={"url": url})
+        assert interaction.guild
 
+        id_string = str(self.custom_id)
+        command = cast(Callable[..., Awaitable[None]], getattr(self.music, id_string.split("_")[0], None))
+        queue = self.music.queue[interaction.guild.id]
+        cctx = copy.copy(queue.ctx)
+        setattr(cctx, "_request_type", "button")
 
-class YTDLSource(discord.PCMVolumeTransformer):
-    def __init__(self, source: any, *, data: any, volume: float = 0.50):
-        super().__init__(source, volume)
+        if callable(command):
+            if "volume" in id_string:
+                volume_map = {
+                    "volume_min": 0,
+                    "volume_down": int((queue.volume * 100) - 10),
+                    "volume_mid": 100,
+                    "volume_up": int((queue.volume * 100) + 10),
+                    "volume_max": 200
+                }
+                await command(cctx, volume_map[id_string])
+            elif id_string == "loop":
+                loop_modes = ["Disabled", "Single", "Queue"]
+                current_mode_index = loop_modes.index(queue.loop)
+                next_mode = loop_modes[(current_mode_index + 1) % len(loop_modes)]
 
-        self.data = data
+                await command(cctx, next_mode)
+            elif id_string == "replay":
+                await command(cctx, 0, 1, True)
+            elif id_string == "remove":
+                await command(cctx, "1;")
+            else:
+                await command(cctx)
+    
+class PlayMessageView(discord.ui.View):
+    def __init__(self, music: "Music", disable_back: bool, disable_remove: bool, pause_style: discord.ButtonStyle, loop_style: discord.ButtonStyle, options: list[discord.SelectOption] = []):
+        super().__init__(timeout=None)
+        self.add_item(PlayMessageMenu(options[:25], not bool(options), music))
+        self.add_item(PlayMessageButton(discord.ButtonStyle.danger, False, "volume_min", Emoji.VOLUME_MIN, 2, music))
+        self.add_item(PlayMessageButton(discord.ButtonStyle.danger, False, "volume_down", Emoji.VOLUME_DOWN, 2, music))
+        self.add_item(PlayMessageButton(discord.ButtonStyle.secondary, False, "volume_mid", Emoji.VOLUME_MID, 2, music))
+        self.add_item(PlayMessageButton(discord.ButtonStyle.success, False, "volume_up", Emoji.VOLUME_UP, 2, music))
+        self.add_item(PlayMessageButton(discord.ButtonStyle.success, False, "volume_max", Emoji.VOLUME_MAX, 2, music))
+        self.add_item(PlayMessageButton(loop_style, False, "loop", Emoji.LOOP, 3, music))
+        self.add_item(PlayMessageButton(discord.ButtonStyle.secondary, disable_back, "replay", Emoji.BACK, 3, music))
+        self.add_item(PlayMessageButton(pause_style, False, "pause", Emoji.PAUSE, 3, music))
+        self.add_item(PlayMessageButton(discord.ButtonStyle.secondary, False, "skip", Emoji.SKIP, 3, music))
+        self.add_item(PlayMessageButton(discord.ButtonStyle.danger, disable_remove, "remove", Emoji.REMOVE, 3, music))
 
-    @classmethod
-    async def from_url(cls, url: str, *, loop: any = None, stream: bool = False, filter_: str = None,
-                       start_at: int = None):
-        ffmpeg_options = {"before_options": f"{f'-ss {start_at}' if start_at else ''} "
-                                            f"-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-                          "options": f"{f'-vn {filter_}' if filter_ else ''}"}
-        loop = loop or asyncio.get_event_loop()
-        data = await loop.run_in_executor(None, lambda: Constants.YTDL.extract_info(url, download=not stream))
-
-        if "entries" in data:
-            data = data["entries"][0]
-
-        filename = data["url"] if stream else Constants.YTDL.prepare_filename(data)
-
-        return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
-
-
-class PlayerEntry:
-    def __init__(self, title: str, url: str, duration: str, uploader: str, uploader_id: str, start: int = 0,
-                 filter_: dict[str, any] = None, source: any = None):
-        self.title = title
-        self.url = url
-        self.duration = duration
-        self.uploader = uploader
-        self.uploader_id = uploader_id
-        self.start = start
-        self.filter_ = filter_
-        self.source = source
-
-    def __str__(self):
-        return self.title
-
-    def set_filter(self, filter_: dict[str, any]):
-        self.filter_ = filter_
-
-    def set_start(self, start: int):
-        self.start = start
-
-    def set_source(self, source: any):
-        self.source = source
-
-    def set_volume(self, volume: float):
-        if self.source:
-            self.source.volume = volume
-
-
-class ByteSink(Sink):
-    def __init__(self, *, filters=None):
-        super().__init__(filters=filters)
-
-    def write(self, data, user):
-        if user not in self.audio_data:
-            file = io.BytesIO()
-            self.audio_data[user] = file
-
-        self.audio_data[user].write(data)
-
-    def cleanup(self):
-        self.finished = True
-
-        for file in self.audio_data.values():
-            file.seek(0)
-
-    def get_audio_as_bytes(self, user):
-        if user not in self.audio_data:
-            return
-
-        self.audio_data[user].seek(0)
-        return self.audio_data[user].read()
-
+config = dotenv_values(".env")
+GENIUS = lyricsgenius.Genius(config["GENIUS_TOKEN"], verbose=False)
 
 class Music(commands.Cog):
     def __init__(self, bot: discord.Bot):
         self.bot = bot
+        self.queue: dict[int, Queue] = {}
 
-        self.ctx = {}
-        self.queue = {}
-        self.previous = {}
-        self.booleans = {}
-        self.filters = {}
-        self.volume = {}
-        self.elapsed_time = {}
-        self.text_channel = {}
-        self.loop = {}
-        self.messages = {}
-        self.removed = {}
-        self.button_invoker = {}
-        self.gui = {}
-        self.views = {}
-        self.autoplay = {}
-        self.speech_invoker = {}
+    async def cog_before_invoke(self, ctx: discord.ApplicationContext):
+        await self._initialize_queue(ctx)
+        self.queue[ctx.guild.id].text_channel = ctx.channel.id
+        self.queue[ctx.guild.id].ctx = ctx
 
-    @staticmethod
-    def raw_to_wav_buffer(raw_data):
-        wav_buffer = io.BytesIO()
+    async def _initialize_queue(self, ctx: discord.ApplicationContext):
+        self.queue.setdefault(ctx.guild.id, Queue())
 
-        with wave.open(wav_buffer, "wb") as wf:
-            wf.setnchannels(2)
-            wf.setsampwidth(2)
-            wf.setframerate(48000)
-            wf.writeframes(raw_data)
-
-        wav_buffer.seek(0)
-        return wav_buffer
-
-    def store_queue_count(self):
-        global QUEUE_LIST
-        QUEUE_LIST = [guild_id for guild_id in self.queue]
-
-    def count_elapsed_time(self, ctx: discord.ApplicationContext):
-        if not self.elapsed_time[ctx.guild.id]["start"]:
-            return 0
-
-        self.elapsed_time[ctx.guild.id]["current"] = time.time()
-
-        if self.elapsed_time[ctx.guild.id]["pause_start"]:
-            return int((self.elapsed_time[ctx.guild.id]["current"] - self.elapsed_time[ctx.guild.id]["start"]) -
-                       (self.elapsed_time[ctx.guild.id]["current"] - self.elapsed_time[ctx.guild.id]["pause_start"]))
-        else:
-            return int(self.elapsed_time[ctx.guild.id]["current"] - self.elapsed_time[ctx.guild.id]["start"] -
-                       self.elapsed_time[ctx.guild.id]["pause"] + self.elapsed_time[ctx.guild.id]["seek"])
-
-    def resolve_view(self, ctx: discord.ApplicationContext):
-        if not (len(self.queue[ctx.guild.id]) - 1) and not self.previous[ctx.guild.id]:
-            return self.views[ctx.guild.id]["no_remove_and_back"]
-        elif (len(self.queue[ctx.guild.id]) - 1) and not self.previous[ctx.guild.id]:
-            return self.views[ctx.guild.id]["no_back"]
-        elif not (len(self.queue[ctx.guild.id]) - 1) and self.previous[ctx.guild.id]:
-            return self.views[ctx.guild.id]["no_remove"]
-        else:
-            return self.views[ctx.guild.id]["all"]
-
-    @staticmethod
-    async def connect_handling(ctx: discord.ApplicationContext, play: bool = False):
-        if not ctx.author.voice:
-            embed = discord.Embed(
-                description=f"**Note:** Please connect to a voice channel first.",
-                color=discord.Color.blue()
-            )
-            await ctx.respond(embed=embed)
-            return
-
-        channel = ctx.author.voice.channel
-
-        if not ctx.voice_client:
-            embed = discord.Embed(
-                description=f"**Connecting to voice channel:** <#{channel.id}>",
-                color=discord.Color.dark_green()
-            )
-            await ctx.respond(embed=embed)
-
-            await channel.connect()
-            await ctx.guild.change_voice_state(channel=channel, self_deaf=True)
-        elif channel != ctx.voice_client.channel:
-            embed = discord.Embed(
-                description=f"**Moving to voice channel:** <#{channel.id}>",
-                color=discord.Color.dark_green()
-            )
-            await ctx.respond(embed=embed)
-
-            await ctx.voice_client.move_to(channel)
-            await ctx.guild.change_voice_state(channel=channel, self_deaf=True)
-        elif ctx.voice_client and channel == ctx.voice_client.channel and not play:
-            embed = discord.Embed(
-                description=f"**Error:** Already connected to voice channel `{channel}`.",
-                color=discord.Color.red()
-            )
-            await ctx.respond(embed=embed)
-
-        return channel
-
-    @staticmethod
-    async def get_video_info(query: str, is_url: bool = False, ignore_live: bool = False):
-        if is_url:
-            return await Video.getInfo(query)
-        else:
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None,
-                                              lambda: VideosSearch(query, limit=1 if not ignore_live else 10).result())
-
-    @staticmethod
-    async def get_spotify_tracks(info_dict: dict[str, any], is_playlist: bool = False):
-        track_list = []
-
-        tracks = info_dict["items"]
-
-        while info_dict["next"]:
-            info_dict = Constants.SPOTIFY.next(info_dict)
-            tracks.extend(info_dict["items"])
-
-        for track in tracks:
-            if is_playlist:
-                track_info = track["track"]
-            else:
-                track_info = track
-
-            try:
-                artist = track_info["album"]["artists"][0]["name"] if is_playlist else track_info["artists"][0]["name"]
-
-                if artist != "Various Artists":
-                    track_list.append(f"{artist} - {track_info['name']}")
-                else:
-                    track_list.append(track_info["name"])
-            except IndexError:
-                track_list.append(track_info["name"])
-            except TypeError:
-                continue
-
-        return track_list
-
-    async def cleanup(self, ctx: discord.ApplicationContext):
+    async def _cleanup(self, ctx: discord.ApplicationContext):
         try:
-            channel = self.bot.get_guild(int(ctx.guild.id)).get_channel(self.text_channel[ctx.guild.id])
-            message = await channel.fetch_message(self.messages[ctx.guild.id]["main"].id)
-            await message.edit(view=None)
-        except (discord.NotFound, discord.HTTPException, AttributeError) as e:
-            print("Exception occurred during cleanup:", e)
-
-        for dictionary in [self.ctx, self.queue, self.previous, self.booleans, self.filters, self.volume,
-                           self.elapsed_time, self.text_channel, self.loop, self.messages, self.button_invoker,
-                           self.gui, self.views, self.removed, self.autoplay]:
-            if ctx.guild.id in dictionary:
-                del dictionary[ctx.guild.id]
-        self.store_queue_count()
-
-    async def refresh_main_embed(self, ctx: discord.ApplicationContext, include_loops: bool = False):
-        start_val = self.queue[ctx.guild.id][0].start
-        channel = self.bot.get_guild(int(ctx.guild.id)).get_channel(self.text_channel[ctx.guild.id])
-
-        try:
-            message = await channel.fetch_message(self.messages[ctx.guild.id]["main"].id)
-            now_playing_msg = (
-                f"**♪ Now playing:** " if self.loop[ctx.guild.id]["mode"] == "Disabled" else
-                f"**∞ Now looping:** " if self.loop[ctx.guild.id][
-                                              "mode"] == "Single" else f"**∞ Now in loop:** "
-            )
-            next_in_queue_msg = (
-                f"**Next in {'loop' if self.loop[ctx.guild.id]['mode'] == 'Queue' else 'queue'}:** "
-                f"[{self.queue[ctx.guild.id][1].title}]({self.queue[ctx.guild.id][1].url})"
-                if len(self.queue[ctx.guild.id]) > 1 else "**Note:** No further songs in queue."
-            )
-            dur = self.queue[ctx.guild.id][0].duration
-
-            embed = discord.Embed(
-                description=f"{now_playing_msg}[{self.queue[ctx.guild.id][0].title}]"
-                            f"({self.queue[ctx.guild.id][0].url})"
-                            f" [**{f'{seconds_to_timestamp(start_val)} -> ' if start_val else ''}"
-                            f"{format_timestamp(dur)}**] [**{len(self.previous[ctx.guild.id]) + 1} | "
-                            f"{len(self.queue[ctx.guild.id]) + len(self.previous[ctx.guild.id])}**]\n"
-                            f"{next_in_queue_msg}",
-                color=discord.Color.dark_green()
-            )
-            if include_loops:
-                embed.description += f"\n\n**Looped: {self.loop[ctx.guild.id]['count']}** time(s)"
-            embed.set_footer(text=message.embeds[0].footer.text, icon_url=message.embeds[0].footer.icon_url)
-            await message.edit(embed=embed, view=self.resolve_view(ctx))
-        except (discord.NotFound, AttributeError):
+            play_msg = self.queue[ctx.guild.id].messages["play"]
+            if play_msg: await play_msg.edit(view=None)
+        except discord.NotFound:
             pass
 
-    async def resolve_source(self, ctx: discord.ApplicationContext, filter_: str, start: int):
-        if ctx.guild.id not in self.queue:
-            return
+        self.queue[ctx.guild.id].clear()
+        del self.queue[ctx.guild.id]
+
+    async def _resolve_view(self, ctx: discord.ApplicationContext):
+        queue = self.queue[ctx.guild.id]
+        loop_style_map = {
+            "Disabled": discord.ButtonStyle.secondary,
+            "Single": discord.ButtonStyle.primary,
+            "Queue": discord.ButtonStyle.success
+        }
+        pause_style = discord.ButtonStyle.primary if ctx.voice_client and ctx.voice_client.is_paused() else discord.ButtonStyle.secondary
+        loop_style = loop_style_map[queue.loop]
+        suggested = [discord.SelectOption(label=song["title"], value=song["url"], description=song["url"]) for song in queue.songs[0].related]
+
+        return PlayMessageView(self, not bool(len(queue.previous_songs)), queue.empty(), pause_style, loop_style, suggested)
+    
+    async def _update_play_message(self, ctx: discord.ApplicationContext):
+        queue = self.queue[ctx.guild.id]
+        play_msg = queue.messages["play"]
 
         try:
-            source = await PytubeSource.from_url(self.queue[ctx.guild.id][0].url, loop=self.bot.loop, filter_=filter_,
-                                                 start_at=start)
-        except (AgeRestrictedError, VideoUnavailable, AttributeError):
-            source = await YTDLSource.from_url(self.queue[ctx.guild.id][0].url, loop=self.bot.loop, stream=True,
-                                               filter_=filter_, start_at=start)
-
-        self.queue[ctx.guild.id][0].set_source(source)
-        self.queue[ctx.guild.id][0].filter_ = self.filters[ctx.guild.id]
-        self.queue[ctx.guild.id][0].source.volume = self.volume[ctx.guild.id]
-
-        return source
-
-    async def song_addition_handling(self, ctx: discord.ApplicationContext, query: str, is_url: bool = False,
-                                     insert: int = None, ignore_live: bool = False, start_at: str = None,
-                                     type_: Sources = Sources.YOUTUBE):
-        if is_url:
-            try:
-                result: dict = await self.get_video_info(query, is_url=True)
-            except ValueError:
-                result: dict = await self.get_video_info(Constants.YOUTUBE_URL.format(query.split("/")[-1]),
-                                                         is_url=True)
-        else:
-            search: dict = await self.get_video_info(query, ignore_live=ignore_live)
-
-            if not search["result"]:
-                embed = discord.Embed(
-                    description=f"**Error:** No videos found for query `{query}`.",
-                    color=discord.Color.red()
-                )
-                await ctx.respond(embed=embed)
-                return False
-
-            result = search["result"][0] if not ignore_live else \
-                next((item for item in search["result"] if not re.match(Constants.LIVE_REGEX, item["title"].lower())),
-                     search["result"][0])
-
-        player_entry = PlayerEntry(
-            result["title"], result["link"],
-            seconds_to_timestamp(int(result["duration"]["secondsText"])) if is_url else result["duration"],
-            result["channel"]["name"], result["channel"]["id"], timestamp_to_seconds(start_at)
-        )
-
-        if not insert:
-            self.queue[ctx.guild.id].append(player_entry)
-        else:
-            self.queue[ctx.guild.id].insert(insert, player_entry)
-
-        dur = player_entry.duration
-
-        if (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()) and not insert:
-            embed = discord.Embed(
-                description=f"**{Constants.EMOJI_DICT[type_]} Added to queue:** "
-                            f"[{player_entry.title}]({player_entry.url}) "
-                            f"[**{f'{format_timestamp(start_at, timestamp_to_seconds(dur))} -> ' if start_at else ''}"
-                            f"{format_timestamp(dur)}**] [**{len(self.queue[ctx.guild.id]) - 1}**]",
-                color=discord.Color.dark_green()
-            )
-            if self.speech_invoker[ctx.guild.id]:
-                embed.set_footer(text=f"Requested via a voice command [{self.speech_invoker[ctx.guild.id]}]")
-                await ctx.send(embed=embed)
-            else:
-                try:
-                    await ctx.respond(embed=embed)
-                except discord.errors.HTTPException:
-                    await ctx.send(embed=embed)
-
-            if len(self.queue[ctx.guild.id]) < 3:
-                await self.refresh_main_embed(ctx)
-        elif (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()) and insert:
-            embed = discord.Embed(
-                description=f"**{Constants.EMOJI_DICT[type_]} Inserted to queue:** "
-                            f"[{player_entry.title}]({player_entry.url}) "
-                            f"[**{f'{format_timestamp(start_at, timestamp_to_seconds(dur))} -> ' if start_at else ''}"
-                            f"{format_timestamp(dur)}**] [**{insert}**]",
-                color=discord.Color.dark_green()
-            )
-            if self.speech_invoker[ctx.guild.id]:
-                await ctx.send(embed=embed)
-            else:
-                try:
-                    await ctx.respond(embed=embed)
-                except discord.errors.HTTPException:
-                    await ctx.send(embed=embed)
-
-            if len(self.queue[ctx.guild.id]) < 3:
-                await self.refresh_main_embed(ctx)
-
-        return True
-
-    async def playlist_addition_handling(self, ctx: discord.ApplicationContext, queries: list[str], title: str,
-                                         url: str, has_urls: bool = False, ignore_live: bool = False,
-                                         pre_shuffle: bool = False, type_: any = Sources.YOUTUBE):
-        embed = discord.Embed(
-            description=f"Adding **{len(queries)}** song(s) to queue from the playlist: {title}\n"
-                        f"This will take **a moment...**",
-            color=discord.Color.dark_green()
-        )
-        msg = await ctx.respond(embed=embed)
-
-        results = list(await asyncio.gather(*(self.get_video_info(res, is_url=has_urls, ignore_live=ignore_live) for
-                                              res in queries)))
-
-        if pre_shuffle:
-            random.shuffle(results)
-
-        if type_ == Sources.YOUTUBE:
-            durations = [int(res["duration"]["secondsText"]) if has_urls else res["duration"] for res in results]
-
-            for result in results:
-                player_entry = PlayerEntry(
-                    result["title"], result["link"],
-                    seconds_to_timestamp(int(result["duration"]["secondsText"])),
-                    result["channel"]["name"], result["channel"]["id"]
-                )
-                self.queue[ctx.guild.id].append(player_entry)
-        else:
-            durations = [timestamp_to_seconds(res["result"][0]["duration"]) for res in results]
-
-            for result in results:
-                player_entry = PlayerEntry(
-                    result["result"][0]["title"], result["result"][0]["link"], result["result"][0]["duration"],
-                    result["result"][0]["channel"]["name"], result["result"][0]["channel"]["id"]
-                )
-                self.queue[ctx.guild.id].append(player_entry)
-
-        embed = discord.Embed(
-            description=f"{Constants.EMOJI_DICT[type_]} Successfully added **{len(results)}** song(s) to queue"
-                        f"{' **pre-shuffled**' if pre_shuffle else ''} from the playlist: [{title}]({url}) "
-                        f"[**{seconds_to_timestamp(sum(durations))}**]",
-            color=discord.Color.dark_green()
-        )
-        await msg.edit(embed=embed)
-
-        await self.refresh_main_embed(ctx)
-
-    async def populate_select_menu(self, ctx: discord.ApplicationContext):
-        rel = await self.get_related_videos(ctx, self.queue[ctx.guild.id][0].url)
-
-        select_options = [discord.SelectOption(label=entry[0], value=entry[1], description=entry[2]) for entry in rel]
-
-        if not select_options:
-            self.gui[ctx.guild.id]["select"].options = [discord.SelectOption(
-                label=self.queue[ctx.guild.id][0].title, value=self.queue[ctx.guild.id][0].url,
-                description=self.queue[ctx.guild.id][0].uploader)]
-            return
-
-        self.gui[ctx.guild.id]["select"].options = select_options
-
-    async def get_related_videos(self, ctx: discord.ApplicationContext, url: str, first: bool = False):
-        headers = {"User-Agent": Constants.USER_AGENT}
-        response = HTMLSession().get(url, headers=headers)
-        related = re.findall(r'"/watch\?v=([^"\\]*)"', response.text)
-        unique_ids = set([entry.url.split("?v=")[1] for entry in self.previous[ctx.guild.id]])
-        related_list = []
-
-        for entry in related:
-            if entry != url.split("?v=")[1] and entry not in unique_ids:
-                try:
-                    response = Constants.YOUTUBE.videos().list(part="snippet", id=entry).execute()
-                except googleapiclient.errors.HttpError:
-                    break
-
-                video = response["items"][0]
-                related_list.append((video["snippet"]["title"], Constants.YOUTUBE_URL.format(entry),
-                                     video["snippet"]["channelTitle"]))
-                unique_ids.add(entry)
-
-            if (first and len(related_list) == 1) or len(related_list) == 5:
-                break
-
-        return related_list
-
-    async def resolve_gui_callback(self, ctx: discord.ApplicationContext, gui_element: str):
-        async def select_callback(interaction: discord.Interaction):
-            await interaction.response.defer()
-            result: dict = await self.get_video_info(self.gui[ctx.guild.id]["select"].values[0], is_url=True)
-
-            player_entry = PlayerEntry(
-                result["title"], result["link"],
-                seconds_to_timestamp(int(result["duration"]["secondsText"])),
-                result["channel"]["name"], result["channel"]["id"]
-            )
-            self.queue[ctx.guild.id].append(player_entry)
-
-            embed = discord.Embed(
-                description=f"**{Constants.EMOJI_DICT[Sources.YOUTUBE]} Added to queue:** [{player_entry.title}]"
-                            f"({player_entry.url}) [**{format_timestamp(player_entry.duration)}**] "
-                            f"[**{len(self.queue[ctx.guild.id]) - 1}**]",
-                color=discord.Color.dark_green()
-            )
-            embed.set_footer(text=f"Requested via a suggestion [{interaction.user.name}]")
-            await ctx.send(embed=embed)
-
-            await self.refresh_main_embed(ctx)
-
-        async def pause_callback(interaction: discord.Interaction):
-            await interaction.response.defer()
-            self.button_invoker[ctx.guild.id] = interaction.user.name
-            await self.pause(ctx)
-            self.button_invoker[ctx.guild.id] = None
-            await interaction.message.edit(view=self.resolve_view(ctx))
-
-        async def skip_callback(interaction: discord.Interaction):
-            await interaction.response.defer()
-            self.button_invoker[ctx.guild.id] = interaction.user.name
-            await self.skip(ctx)
-            self.button_invoker[ctx.guild.id] = None
-
-        async def remove_callback(interaction: discord.Interaction):
-            await interaction.response.defer()
-            self.button_invoker[ctx.guild.id] = interaction.user.name
-            await self.remove(ctx, from_="1")
-            self.button_invoker[ctx.guild.id] = None
-            await interaction.message.edit(view=self.resolve_view(ctx))
-
-        async def back_callback(interaction: discord.Interaction):
-            await interaction.response.defer()
-            self.button_invoker[ctx.guild.id] = interaction.user.name
-            await self.replay(ctx, instant=True)
-            self.button_invoker[ctx.guild.id] = None
-
-        async def volume_min_callback(interaction: discord.Interaction):
-            await interaction.response.defer()
-            self.button_invoker[ctx.guild.id] = interaction.user.name
-            await self.volume_(ctx, level=0)
-            self.button_invoker[ctx.guild.id] = None
-
-        async def volume_down_callback(interaction: discord.Interaction):
-            await interaction.response.defer()
-            self.button_invoker[ctx.guild.id] = interaction.user.name
-            await self.volume_(ctx, level=(self.queue[ctx.guild.id][0].source.volume * 100) - 10)
-            self.button_invoker[ctx.guild.id] = None
-
-        async def volume_mid_callback(interaction: discord.Interaction):
-            await interaction.response.defer()
-            self.button_invoker[ctx.guild.id] = interaction.user.name
-            await self.volume_(ctx, level=50)
-            self.button_invoker[ctx.guild.id] = None
-
-        async def volume_up_callback(interaction: discord.Interaction):
-            await interaction.response.defer()
-            self.button_invoker[ctx.guild.id] = interaction.user.name
-            await self.volume_(ctx, level=(self.queue[ctx.guild.id][0].source.volume * 100) + 10)
-            self.button_invoker[ctx.guild.id] = None
-
-        async def volume_max_callback(interaction: discord.Interaction):
-            await interaction.response.defer()
-            self.button_invoker[ctx.guild.id] = interaction.user.name
-            await self.volume_(ctx, level=200)
-            self.button_invoker[ctx.guild.id] = None
-
-        async def loop_callback(interaction: discord.Interaction):
-            await interaction.response.defer()
-            self.button_invoker[ctx.guild.id] = interaction.user.name
-
-            if self.loop[ctx.guild.id]["mode"] == "Disabled":
-                await self.loop_(ctx, mode="Single")
-            elif self.loop[ctx.guild.id]["mode"] == "Single":
-                await self.loop_(ctx, mode="Queue")
-            else:
-                await self.loop_(ctx, mode="Disabled")
-
-            self.button_invoker[ctx.guild.id] = None
-            await interaction.message.edit(view=self.resolve_view(ctx))
-
-        callbacks = {
-            "select": select_callback,
-            "back": back_callback,
-            "pause": pause_callback,
-            "skip": skip_callback,
-            "loop": loop_callback,
-            "remove": remove_callback,
-            "volume_min": volume_min_callback,
-            "volume_down": volume_down_callback,
-            "volume_mid": volume_mid_callback,
-            "volume_up": volume_up_callback,
-            "volume_max": volume_max_callback,
-        }
-        return callbacks[gui_element]
-
-    async def after_song(self, ctx: discord.ApplicationContext, e: any):
-        if ctx.guild.id not in self.queue or not self.queue[ctx.guild.id]:
-            return
-        elif e:
-            print(f"Error occurred after playing: {e}")
-
-        if self.booleans[ctx.guild.id]["clear_elapsed"]:
-            try:
-                await self.messages[ctx.guild.id]["main"].edit(view=None)
-            except (discord.NotFound, discord.HTTPException):
-                pass
-
-        last_song = self.queue[ctx.guild.id][0]
-
-        if self.loop[ctx.guild.id]["mode"] != "Single":
-            self.loop[ctx.guild.id]["count"] = 0
-
-        if self.booleans[ctx.guild.id]["clear_elapsed"] and self.loop[ctx.guild.id]["mode"] == "Disabled":
-            if not self.booleans[ctx.guild.id]["backed"]:
-                self.previous[ctx.guild.id].append(self.queue[ctx.guild.id].pop(0))
-            else:
-                self.queue[ctx.guild.id].pop(0)
-        elif ((self.booleans[ctx.guild.id]["clear_elapsed"] and self.loop[ctx.guild.id]["mode"] != "Disabled") or
-              not self.booleans[ctx.guild.id]["clear_elapsed"]):
-            self.queue[ctx.guild.id].pop(0)
-
-        if self.booleans[ctx.guild.id]["clear_elapsed"] and self.loop[ctx.guild.id]["mode"] != "Disabled":
-            copied_last_song = PlayerEntry(
-                last_song.title, last_song.url, last_song.duration, last_song.uploader, last_song.uploader_id,
-                0, last_song.filter_, last_song.source
-            )
-            self.queue[ctx.guild.id].append(copied_last_song) if self.loop[ctx.guild.id]["mode"] == "Queue" else \
-                self.queue[ctx.guild.id].insert(0, copied_last_song)
-
-        for key in self.elapsed_time[ctx.guild.id].keys():
-            if ctx.voice_client and not self.booleans[ctx.guild.id]["clear_elapsed"]:
-                continue
-            self.elapsed_time[ctx.guild.id][key] = 0
-
-        if self.queue[ctx.guild.id]:
-            await self.bot.loop.create_task(self.play_next(ctx))
-        elif self.autoplay[ctx.guild.id] == "Enabled":
-            related = await self.get_related_videos(ctx, self.previous[ctx.guild.id][-1].url, first=True)
-            await self.play(ctx, related[0][1])
-
-    async def play_next(self, ctx: discord.ApplicationContext):
-        if ctx.guild.id not in self.queue or not self.queue[ctx.guild.id]:
-            return
-
-        filter_val = self.queue[ctx.guild.id][0].filter_["value"] if self.queue[ctx.guild.id][0].filter_ else None
-        start_val = self.queue[ctx.guild.id][0].start
-
-        source = await self.resolve_source(ctx, filter_val, start_val)
-
-        if not source:
-            return
-
-        ctx.voice_client.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(self.after_song(ctx, e),
-                                                                                       self.bot.loop))
-        self.elapsed_time[ctx.guild.id]["start"] = time.time()
-
-        if start_val:
-            self.elapsed_time[ctx.guild.id]["seek"] = start_val
-            self.booleans[ctx.guild.id]["clear_elapsed"] = False
-
-        if not self.booleans[ctx.guild.id]["first"] and not self.booleans[ctx.guild.id]["ignore_msg"] and \
-                self.loop[ctx.guild.id]["count"] == 0:
-            try:
-                response = Constants.YOUTUBE.channels().list(part="snippet",
-                                                             id=self.queue[ctx.guild.id][0].uploader_id).execute()
-                uploader_picture_url = response["items"][0]["snippet"]["thumbnails"]["high"]["url"]
-            except (IndexError, googleapiclient.errors.HttpError):
-                uploader_picture_url = None
-
-            for key in self.messages[ctx.guild.id].keys():
-                self.messages[ctx.guild.id][key] = None if key != "main" else self.messages[ctx.guild.id][key]
-            self.removed[ctx.guild.id].clear()
-
-            await self.populate_select_menu(ctx)
-
-            now_playing_msg = (
-                f"**♪ Now playing:** " if self.loop[ctx.guild.id]["mode"] == "Disabled" else
-                f"**∞ Now looping:** " if self.loop[ctx.guild.id]["mode"] == "Single" else f"**∞ Now in loop:** "
-            )
-            next_in_queue_msg = (
-                f"**Next in {'loop' if self.loop[ctx.guild.id]['mode'] == 'Queue' else 'queue'}:** "
-                f"[{self.queue[ctx.guild.id][1].title}]({self.queue[ctx.guild.id][1].url})"
-                if len(self.queue[ctx.guild.id]) > 1 else "**Note:** No further songs in queue."
-            )
-            dur = self.queue[ctx.guild.id][0].duration
-
-            embed = discord.Embed(
-                description=f"{now_playing_msg}[{self.queue[ctx.guild.id][0].title}]({self.queue[ctx.guild.id][0].url})"
-                            f" [**{f'{seconds_to_timestamp(start_val)} -> ' if start_val else ''}"
-                            f"{format_timestamp(dur)}**] [**{len(self.previous[ctx.guild.id]) + 1} | "
-                            f"{len(self.queue[ctx.guild.id]) + len(self.previous[ctx.guild.id])}**]\n"
-                            f"{next_in_queue_msg}",
-                color=discord.Color.dark_green()
-            )
-            embed.set_footer(text=self.queue[ctx.guild.id][0].uploader, icon_url=uploader_picture_url)
-            self.messages[ctx.guild.id]["main"] = await ctx.send(embed=embed, view=self.resolve_view(ctx))
-        elif not self.booleans[ctx.guild.id]["first"] and not self.booleans[ctx.guild.id]["ignore_msg"] and \
-                self.loop[ctx.guild.id]["count"] > 0:
-            await self.refresh_main_embed(ctx, include_loops=True)
-
-        self.booleans[ctx.guild.id]["first"] = False
-        self.booleans[ctx.guild.id]["ignore_msg"] = False
-        self.booleans[ctx.guild.id]["clear_elapsed"] = True
-        self.booleans[ctx.guild.id]["backed"] = False
-
-        self.loop[ctx.guild.id]["count"] += 1 if self.loop[ctx.guild.id]["mode"] == "Single" else \
-            -(self.loop[ctx.guild.id]["count"])
-
-    async def invoke_speech_event(self, ctx: discord.ApplicationContext):
-        self.speech_invoker[ctx.guild.id] = ctx.interaction.user.name
-
-        await ctx.guild.change_voice_state(channel=ctx.voice_client.channel, self_deaf=False)
-        await asyncio.sleep(0.35)
-        await ctx.guild.change_voice_state(channel=ctx.voice_client.channel, self_deaf=True)
-
-    async def detect_speech(self, ctx: discord.ApplicationContext, voice_client: discord.VoiceClient):
-        with open("Data/settings.json", "r") as settings_file:
-            settings = json.load(settings_file)
-
-        language = settings.get(str(ctx.guild.id), {}).get("language", "en-US")
-        speech_recognition_enabled = settings.get(str(ctx.guild.id), {}).get("speech_recognition", True)
-
+            if len(queue) and play_msg:
+                song = queue.songs[0]
+
+                loop_count = getattr(song, "_loop_count", None)
+                now_playing_msg = f"**{'♪ Now playing' if queue.loop == 'Disabled' else ('∞ Now looping' if queue.loop == 'Single' else '∞ Now in loop')}:** [{song.title}]({song.url}) [**{f'{format_duration(song.start_at, False)} -> ' if song.start_at and not hasattr(song, '_sought') else ''}{song.formatted_duration}**] [**{len(queue.previous_songs) + 1} | {len(queue.previous_songs) + len(queue)}**]{f' [**{loop_count}x**]' if loop_count else ''}\n"
+                now_playing_msg += (f"**Next in queue:** [{queue.songs[1].title}]({queue.songs[1].url})" if len((queue)) > 1 else "**Note:** No further songs in queue.")
+                
+                embed = play_msg.embeds[0].copy()
+                embed.description = now_playing_msg
+                await play_msg.edit(embed=embed, view=await self._resolve_view(ctx))
+            elif play_msg:
+                await play_msg.edit(view=await self._resolve_view(ctx))
+        except discord.NotFound:
+            pass
+
+    async def _detect_speech(self, ctx: discord.ApplicationContext):
         async def finished_callback(sink_: ByteSink, _):
-            for user, audio_data in sink_.audio_data.items():
+            for user, _ in sink_.audio_data.items():
                 audio_bytes = sink_.get_audio_as_bytes(user)
 
                 if audio_bytes:
-                    wav_buffer = self.raw_to_wav_buffer(audio_bytes)
-
+                    wav_buffer = sink_.raw_to_wav_buffer(audio_bytes)
                     recognizer = speech_recognition.Recognizer()
+
                     with speech_recognition.AudioFile(wav_buffer) as source:
                         audio = recognizer.record(source)
 
                     try:
-                        recognized_text = google.recognize_legacy(recognizer, audio, os.getenv("GOOGLE_SPEECH_API_KEY"),
-                                                                  language)
+                        recognized_text = str(google.recognize_legacy(recognizer, audio, config["GOOGLE_SPEECH_API_KEY"], "fi-FI"))
                     except speech_recognition.exceptions.UnknownValueError:
                         return
 
                     split_recognized_text = recognized_text.split()
-
-                    print(f"Recognized speech at {ctx.guild.name}:", recognized_text)
-
                     recognized_commands = {
                         "play": self.play,
                         "skip": self.skip,
@@ -760,1059 +177,1104 @@ class Music(commands.Cog):
                     }
 
                     if len(split_recognized_text) > 1 and split_recognized_text[0].lower() in ["play", "toista"]:
-                        await self.invoke_speech_event(ctx)
+                        await self._flash_deafen(ctx)
                         await self.play(ctx, " ".join(split_recognized_text[1:]))
                     else:
                         command = " ".join(split_recognized_text).lower()
 
                         if command in recognized_commands:
-                            await self.invoke_speech_event(ctx)
+                            await self._flash_deafen(ctx)
                             await recognized_commands[command](ctx)
 
-                    self.speech_invoker[ctx.guild.id] = None
+        voice_client = ctx.guild.voice_client
 
-        if speech_recognition_enabled:
+        if voice_client:
             voice_client.start_recording(ByteSink(), finished_callback, voice_client.channel)
             await asyncio.sleep(5)
             voice_client.stop_recording()
 
-    @commands.Cog.listener()
-    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState,
-                                    after: discord.VoiceState):
-        if not before.channel:
-            return
+    async def _after_song(self, ctx: discord.ApplicationContext, e: Exception | None):
+        if e: print(f"{type(e).__name__} occurred in _after_song: {e}")
 
-        voice_client = self.bot.get_guild(member.guild.id).voice_client
+        queue = self.queue[ctx.guild.id]
+        last_song = queue.songs[0]
+        ignore_add = hasattr(last_song, "_ignore_add")
+        ignore_clear = hasattr(last_song, "_ignore_clear")
+        loop_count = hasattr(last_song, "_loop_count")
+        sought = hasattr(last_song, "_sought")
 
-        if voice_client and before.self_mute and not after.self_mute:
-            await self.detect_speech(self.ctx[member.guild.id], voice_client)
-
-        if voice_client and member.guild.voice_client and member.guild.voice_client.channel == before.channel and \
-                (len(before.channel.members) < 2 or all([member.bot for member in before.channel.members])):
-            text_channel = self.bot.get_channel(self.text_channel[member.guild.id])
-            await self.cleanup(self.ctx[member.guild.id])
-
+        if hasattr(last_song, "_disconnect_after") and not ignore_add:
+            await self.disconnect(ctx)
+        elif queue.messages["play"] and not ignore_clear and queue.loop != "Single":
             try:
-                await member.guild.voice_client.disconnect()
+                await queue.messages["play"].edit(view=None)
+            except discord.NotFound:
+                pass
 
+            queue.messages["play"] = None
+
+        if sought:
+            last_song.start_at = 0
+            delattr(last_song, "_sought")
+
+        if hasattr(last_song, "_first"): delattr(last_song, "_first")
+        if hasattr(last_song, "_replayed"): delattr(last_song, "_replayed")
+        if hasattr(last_song, "_ignore_msg"): delattr(last_song, "_ignore_msg")
+
+        if queue.loop == "Single":
+            if not loop_count: setattr(last_song, "_loop_count", 0)
+            setattr(last_song, "_loop_count", getattr(last_song, "_loop_count") + 1)
+        elif queue.loop == "Queue":
+            queue.songs.append(queue.songs.pop(0))
+        elif ignore_add:
+            queue.songs.pop(0)
+        else:
+            queue.previous_songs.append(queue.songs.pop(0))
+
+        if queue.loop != "Single":
+            queue.messages["pause"] = queue.messages["volume"] = queue.messages["loop"] = queue.messages["remove"] = None
+            queue.messages["remove_content"] = ""
+            if ignore_add: delattr(last_song, "_ignore_add")
+            if loop_count: delattr(last_song, "_loop_count")
+
+        if ctx.voice_client and len(queue):
+            await self._play_song(ctx, queue.songs[0])
+        elif ctx.voice_client and queue.autoplay:
+            first_related = last_song.related[0] if last_song.related else None
+
+            if first_related:
+                song = PlayerEntry({
+                    **first_related,
+                    "formatted_duration": format_duration(first_related["duration"]),
+                    "uploader": None,
+                    "uploader_avatar": None,
+                    "start_time": 0,
+                    "start_at": 0,
+                    "requested_by": ctx.user.name
+                })
+                queue.songs.append(song)
+                await self._play_song(ctx, song)
+            else:
                 embed = discord.Embed(
-                    description=f"**Everyone has left the voice channel:** {before.channel}",
-                    color=discord.Color.dark_red(),
+                    description=f"**Error:** No related videos found.",
+                    color=EmbedColor.RED
                 )
-                embed.set_footer(text="Disconnecting, until next time.")
-                await text_channel.send(embed=embed)
-            except AttributeError:
-                embed = discord.Embed(
-                    description=f"**Disconnecting from current voice channel:** {before.channel}",
-                    color=discord.Color.dark_red(),
-                )
-                await text_channel.send(embed=embed)
+                await ctx.send(embed=embed)
+
+    async def _play_song(self, ctx: discord.ApplicationContext, song: PlayerEntry):
+        queue = self.queue[ctx.guild.id]
+
+        try:
+            assert ctx.voice_client
+
+            if song.source == "file":
+                source = await AttachmentSource.from_url(song.url, filter_=queue.filter["value"], start_at=song.start_at)
+            else:
+                try:
+                    source = await YTDLSource.from_url(song.url, pytube=True, filter_=queue.filter["value"], start_at=song.start_at)
+
+                    if not song.related:
+                        uploader_avatar, related = await pytse.resolve_avatar_and_related(song.url.replace("music", "www"))
+                        song.uploader_avatar, song.related = uploader_avatar, related
+                except (LiveStreamError, RegexMatchError, VideoUnavailable) as e:
+                    source = await YTDLSource.from_url(song.url, pytube=False, live=isinstance(e, LiveStreamError), filter_=queue.filter["value"], start_at=song.start_at)
+
+                    if not source: raise Exception("Invalid source")
+                    elif isinstance(source, dict):
+                        embed = discord.Embed(
+                            description=f"Added **{len(source['entries'])}** song(s) to queue from the playlist: [{source.get('title') or '[ Unknown title ]'}]({song.url})",
+                            color=EmbedColor.GREEN
+                        )
+                        await ctx.followup.send(embed=embed)
+
+                        added_songs = [PlayerEntry({
+                            "url": track["url"],
+                            "title": track.get("title") or "[ Unknown title ]",
+                            "duration": track.get("duration"),
+                            "uploader_avatar": None,
+                            "source": None,
+                            "start_time": 0,
+                            "start_at": 0,
+                            "formatted_duration": format_duration(track.get("duration")),
+                            "requested_by": ctx.user.name
+                        }) for track in source["entries"]]
+
+                        queue.songs[0:1] = added_songs
+                        return await self._play_song(ctx, queue.songs[0])
+
+                    if song.title == "[ Unknown title ]": song.title = source.data.get("title") or song.title
+                    if not song.uploader: song.uploader = source.data.get("uploader") or "[ Unknown uploader ]"
+                    if song.duration is None:
+                        duration = source.data.get("duration")
+                        song.duration = (parse_duration(duration) if isinstance(duration, str) else int(duration)) if duration is not None else None
+                        song.formatted_duration = format_duration(song.duration)
+        except Exception as e:
+            print(f"{type(e).__name__} occurred in _play_song: {e}")
+
+            embed = discord.Embed(
+                description=f"**Error:** Invalid source.",
+                color=EmbedColor.RED
+            )
+            await ctx.followup.send(embed=embed, ephemeral=True)
+
+            if len(queue) == 1: del queue.songs[0]
+            elif len(queue):
+                del queue.songs[0]
+                await self._play_song(ctx, queue.songs[0])
+            return
+        
+        if not isinstance(source, YTDLSource):
+            embed = discord.Embed(
+                description=f"**Error:** Invalid source.",
+                color=EmbedColor.RED
+            )
+            return await ctx.followup.send(embed=embed, ephemeral=True)
+
+        song.player = source
+        song.player.volume = queue.volume
+        if not ctx.voice_client: return
+
+        ctx.voice_client.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(self._after_song(ctx, e), self.bot.loop))
+        song.start_time = time.time()
+
+        ignore_msg = hasattr(song, "_ignore_msg")
+        loop_count = getattr(song, "_loop_count", None)
+        now_playing_msg = f"**{'♪ Now playing' if queue.loop == 'Disabled' else ('∞ Now looping' if queue.loop == 'Single' else '∞ Now in loop')}:** [{song.title}]({song.url}) [**{f'{format_duration(song.start_at, False)} -> ' if song.start_at and not hasattr(song, '_sought') else ''}{song.formatted_duration}**] [**{len(queue.previous_songs) + 1} | {len(queue.previous_songs) + len(queue)}**]{f' [**{loop_count}x**]' if loop_count else ''}\n"
+        now_playing_msg += (f"**Next in queue:** [{queue.songs[1].title}]({queue.songs[1].url})" if len((queue)) > 1 else "**Note:** No further songs in queue.")
+
+        if not (ignore_msg or hasattr(song, "_replayed")) and hasattr(song, "_first"):
+            request_type = getattr(ctx, "_request_type", None)
+
+            embed = discord.Embed(
+                description=now_playing_msg,
+                color=EmbedColor.GREEN
+            )
+            embed.set_footer(text=f"{song.uploader}\n{f'Requested via a {request_type} [{ctx.user.name}]' if request_type else ''}", icon_url=song.uploader_avatar)
+            if request_type:
+                queue.messages["play"] = await ctx.send(embed=embed, view=await self._resolve_view(ctx))
+            else:
+                queue.messages["play"] = await ctx.followup.send(embed=embed, view=await self._resolve_view(ctx))
+        elif not ignore_msg:
+            embed = discord.Embed(
+                description=now_playing_msg,
+                color=EmbedColor.GREEN
+            )
+            embed.set_footer(text=song.uploader, icon_url=song.uploader_avatar)
+            
+            if queue.loop == "Single" and queue.messages["play"]:
+                try:
+                    await queue.messages["play"].edit(embed=embed)
+                except discord.NotFound:
+                    queue.messages["play"] = await ctx.send(embed=embed, view=await self._resolve_view(ctx))
+            else:
+                queue.messages["play"] = await ctx.send(embed=embed, view=await self._resolve_view(ctx))
+
+    @staticmethod
+    async def _flash_deafen(ctx: discord.ApplicationContext):
+        if ctx.voice_client:
+            await ctx.guild.change_voice_state(channel=ctx.voice_client.channel, self_deaf=False)
+            await asyncio.sleep(0.25)
+            await ctx.guild.change_voice_state(channel=ctx.voice_client.channel, self_deaf=True)
+
+    @staticmethod
+    async def _connect_handling(ctx: discord.ApplicationContext, play: bool = False):
+        if not ctx.user.voice:
+            embed = discord.Embed(
+                description=f"**Note:** Please connect to a voice channel first.",
+                color=EmbedColor.BLUE
+            )
+            await ctx.followup.send(embed=embed, ephemeral=True)
+            return False
+        
+        channel = ctx.user.voice.channel
+
+        if not ctx.voice_client or (ctx.voice_client and not ctx.voice_client.is_connected()):
+            await channel.connect()
+
+            embed = discord.Embed(
+                description=f"**Connecting to voice channel:** <#{channel.id}>",
+                color=EmbedColor.GREEN
+            )
+            await ctx.followup.send(embed=embed)
+        elif channel != ctx.voice_client.channel:
+            await ctx.voice_client.move_to(channel)
+
+            embed = discord.Embed(
+                description=f"**Moving to voice channel:** <#{channel.id}>",
+                color=EmbedColor.GREEN
+            )
+            await ctx.followup.send(embed=embed)
+        elif not play:
+            embed = discord.Embed(
+                description=f"**Error:** Already connected to the voice channel.",
+                color=EmbedColor.RED
+            )
+            await ctx.followup.send(embed=embed, ephemeral=True)
+            return False
+
+        await ctx.guild.change_voice_state(channel=channel, self_deaf=True)
+        return True
+
+    @commands.slash_command(description="Attempts to repair the bot's voice connection in case of breakage")
+    async def repair(self, ctx: discord.ApplicationContext):
+        if not ctx.user.voice:
+            embed = discord.Embed(
+                description=f"**Note:** Please connect to a voice channel first.",
+                color=EmbedColor.BLUE
+            )
+            return await ctx.respond(embed=embed, ephemeral=True)
+
+        await self._cleanup(ctx)
+        await self._initialize_queue(ctx)
+
+        if ctx.user.voice and (channel := ctx.user.voice.channel):
+            if not ctx.voice_client or (ctx.voice_client and not ctx.voice_client.is_connected()):
+                await channel.connect()
+            elif ctx.voice_client and ctx.voice_client.channel != channel:
+                await ctx.voice_client.move_to(channel)
+
+        embed = discord.Embed(
+            description=f"Bot repaired successfully.",
+            color=EmbedColor.GREEN
+        )
+        await ctx.respond(embed=embed, ephemeral=True)
 
     @commands.slash_command(description="Invites the bot to the voice channel")
     async def connect(self, ctx: discord.ApplicationContext):
-        await ctx.defer()
+        if not ctx.interaction.response.is_done(): await ctx.defer()
 
-        channel = await self.connect_handling(ctx)
-
-        if not channel:
-            await self.cleanup(ctx)
-            return
-
-        self.text_channel[ctx.guild.id] = ctx.channel.id
+        await self._connect_handling(ctx)
 
     @commands.slash_command(description="Removes the bot from the voice channel and clears the queue")
-    @discord.option(name="after_song", description="Disconnects once current song has ended", required=False)
+    @discord.option(name="after_song", description="Disconnect once the current song has ended", required=False)
     async def disconnect(self, ctx: discord.ApplicationContext, after_song: bool = False):
-        try:
-            await ctx.defer()
-        except (discord.ApplicationCommandInvokeError, discord.InteractionResponded, discord.NotFound):
-            pass
-
         if not ctx.voice_client:
             embed = discord.Embed(
-                description="**Error:** Already not connected to a voice channel.",
-                color=discord.Color.red()
+                description=f"**Error:** Already not connected to a voice channel.",
+                color=EmbedColor.RED
             )
-            await ctx.respond(embed=embed)
-            return
-
-        if after_song and ctx.voice_client.is_playing():
+            return await ctx.respond(embed=embed, ephemeral=True)
+        elif not ctx.user.voice or ctx.user.voice.channel != ctx.voice_client.channel:
             embed = discord.Embed(
-                description=f"**Disconnecting after current song:** {self.queue[ctx.guild.id][0].title} "
-                            f"[**{seconds_to_timestamp(self.count_elapsed_time(ctx))} | "
-                            f"{self.queue[ctx.guild.id][0].duration}**]",
-                color=discord.Color.dark_red()
+                description=f"**Note:** Please connect to the voice channel first.",
+                color=EmbedColor.BLUE
             )
-            await ctx.respond(embed=embed)
+            return await ctx.respond(embed=embed, ephemeral=True)
+    
+        queue = self.queue[ctx.guild.id]
+        current_song = queue.songs[0] if len(queue) else None
+        disconnect_after = hasattr(current_song, "_disconnect_after") if current_song else False
 
-            while (ctx.voice_client and (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()) or
-                   self.elapsed_time[ctx.guild.id]["seek"]):
-                await asyncio.sleep(.1)
+        if after_song and current_song:
+            setattr(current_song, "_disconnect_after", not disconnect_after)
+            elapsed = format_duration(int((getattr(current_song, "_paused_at", None) or time.time()) - current_song.start_time) + current_song.start_at, False)
+            embed = discord.Embed(
+                description=f"**{'D' if disconnect_after else 'Cancelled d'}isconnecting after current song:** {current_song.title} [**{elapsed} | {current_song.formatted_duration}**]",
+                color=EmbedColor.DARK_RED
+            )
+            return await ctx.respond(embed=embed)
+        elif not after_song and current_song and disconnect_after:
+            setattr(current_song, "_disconnect_after", False)
+        
+        channel = ctx.voice_client.channel
+        await ctx.voice_client.disconnect()
+        await self._cleanup(ctx)
 
         embed = discord.Embed(
-            description=f"**Disconnecting from current voice channel:** {ctx.voice_client.channel}",
-            color=discord.Color.dark_red()
+            description=f"**Disconnected from current voice channel:** {channel}",
+            color=EmbedColor.DARK_RED
         )
-        if self.speech_invoker[ctx.guild.id]:
-            embed.set_footer(text=f"Requested via a voice command [{self.speech_invoker[ctx.guild.id]}]")
+        if ctx.interaction.response.is_done():
+            request_type = getattr(ctx, "_request_type", None)
+            if request_type: embed.set_footer(text=f"Requested via a {request_type} [{ctx.user.name}]")
+            return await ctx.send(embed=embed)
+        await ctx.respond(embed=embed)
+
+    @commands.slash_command(description="Adds and plays songs in the queue")
+    @discord.option(name="query", description="The song that you wish to play (URL or query)", required=True)
+    @discord.option(name="insert", description="Add the song to the given position in queue", min_value=1, required=False)
+    @discord.option(name="pre_shuffle", description="Shuffle the songs of the playlist ahead of time", required=False)
+    @discord.option(name="start", description="Set the song to start from the given timestamp", required=False)
+    async def play(self, ctx: discord.ApplicationContext, query: str, insert: int = 0, pre_shuffle: bool = False, start: str = "0"):
+        if not ctx.interaction.response.is_done(): await ctx.defer()
+
+        if not ctx.voice_client:
+            success = await self._connect_handling(ctx)
+            if not success: return
+        elif not ctx.user.voice or ctx.user.voice.channel != ctx.voice_client.channel:
+            embed = discord.Embed(
+                description=f"**Note:** Please connect to the voice channel first.",
+                color=EmbedColor.BLUE
+            )
+            return await ctx.followup.send(embed=embed, ephemeral=True)
+        
+        settings = load_settings()
+        key = f"{ctx.user.id}-{ctx.guild.id}"
+        keyword_source = settings.get(key, {}).get("default_search") or "youtube"
+
+        try:
+            result = await pytse.search(query, keyword_source=keyword_source)
+            if result.get("_error"): raise Exception("Search failed")
+
+            queue = self.queue[ctx.guild.id]
+            insert = min(insert or len(queue), len(queue))
+            source = pytse.validate_url(query) or keyword_source
+            emoji = getattr(Emoji, str(source).upper(), None) or ":grey_question:"
+
+            if result.get("tracks"):
+                added_songs = [PlayerEntry({
+                    **track,
+                    "start_time": 0,
+                    "start_at": 0,
+                    "formatted_duration": format_duration(track["duration"]),
+                    "requested_by": ctx.user.name
+                }) for track in result["tracks"]]
+
+                if (pre_shuffle): random.shuffle(added_songs)
+
+                queue.songs[insert:insert] = added_songs
+
+                embed = discord.Embed(
+                    description=f"{emoji} Added **{len(added_songs)}** song(s) to queue{' **pre-shuffled**' if pre_shuffle else ''} from the playlist: [{result['title']}]({query}) [**{format_duration(result['duration'], False)}**]",
+                    color=EmbedColor.GREEN
+                )
+                await ctx.followup.send(embed=embed)
+            
+                if len(queue) == len(added_songs):
+                    return await self._play_song(ctx, queue.songs[0])
+
+                await self._update_play_message(ctx)
+            else:
+                song = PlayerEntry({
+                    **result,
+                    "start_time": 0,
+                    "start_at": parse_duration(start, result["duration"]),
+                    "formatted_duration": format_duration(result["duration"]),
+                    "requested_by": ctx.user.name
+                })
+                if not song.title: song.title = "[ Unknown title ]"
+            
+                queue.songs.insert(insert, song)
+
+                if len(queue) == 1:
+                    setattr(queue.songs[0], "_first", True)
+                    await self._play_song(ctx, queue.songs[0])
+                else:
+                    request_type = getattr(ctx, "_request_type", None)
+
+                    embed = discord.Embed(
+                        description=f"**{emoji} Added to queue:** [{song.title}]({song.url}) [**{f'{format_duration(song.start_at, False)} -> ' if song.start_at and not hasattr(song, '_sought') else ''}{song.formatted_duration}**] [**{insert}**]",
+                        color=EmbedColor.GREEN
+                    )
+                    if request_type:
+                        embed.set_footer(text=f"Requested via a {request_type} [{ctx.user.name}]")
+                        await ctx.send(embed=embed)
+                    else:
+                        await ctx.followup.send(embed=embed)
+                    await self._update_play_message(ctx)
+        except Exception as e:
+            print(f"{type(e).__name__} occurred in play: {e}")
+            embed = discord.Embed(
+                description=f"**Error:** Failed to add query.",
+                color=EmbedColor.RED
+            )
+            await ctx.followup.send(embed=embed, ephemeral=True)
+    
+    @commands.slash_command(description="Plays audio from a given file")
+    @discord.option(name="file", description="File to play audio from", required=True)
+    @discord.option(name="insert", description="Add the song to the given position in queue", min_value=1, required=False)
+    @discord.option(name="start", description="Set the song to start from the given timestamp", required=False)
+    async def play_file(self, ctx: discord.ApplicationContext, file: discord.Attachment, insert: int = 0, start: str = "0"):
+        if not ctx.interaction.response.is_done(): await ctx.defer()
+
+        if not ctx.voice_client:
+            success = await self._connect_handling(ctx)
+            if not success: return
+        elif file.content_type and not file.content_type.startswith("audio/"):
+            embed = discord.Embed(
+                description=f"**Error:** Unsupported file format.",
+                color=EmbedColor.RED
+            )
+            return await ctx.followup.send(embed=embed, ephemeral=True)
+
+        queue = self.queue[ctx.guild.id]
+        insert = min(insert or len(queue), len(queue))
+        channels, sample_rate = 2, 48000
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(file.url) as resp:
+                    if resp.status != 200: raise Exception("File download failed")
+                    input_bytes = await resp.read()
+
+            result = subprocess.run([
+                "ffmpeg",
+                "-i", "pipe:0",
+                "-f", "s16le",
+                "-acodec", "pcm_s16le",
+                "-ar", str(sample_rate),
+                "-ac", str(channels),
+                "pipe:1"
+            ], input=input_bytes, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True)
+
+            pcm_bytes = result.stdout
+            total_samples = len(pcm_bytes) / (channels * 2)
+            duration = int(total_samples / sample_rate)
+        except subprocess.CalledProcessError as e:
+            print(f"CalledProcessError occurred in file duration calculation:", e)
+            duration = None
+
+        song = PlayerEntry({
+            "url": file.url,
+            "title": file.filename.replace("_", " "),
+            "uploader": ctx.user.name,
+            "uploader_avatar": ctx.user.display_avatar,
+            "duration": duration,
+            "source": "file",
+            "start_time": 0,
+            "start_at": parse_duration(start, duration),
+            "formatted_duration": format_duration(duration),
+            "requested_by": ctx.user.name
+        })
+        queue.songs.insert(insert, song)
+
+        if len(queue) == 1:
+            setattr(queue.songs[0], "_first", True)
+            await self._play_song(ctx, queue.songs[0])
+        else:
+            embed = discord.Embed(
+                description=f"**{Emoji.FILE} Added to queue:** [{song.title}]({song.url}) [**{f'{format_duration(song.start_at, False)} -> ' if song.start_at and not hasattr(song, '_sought') else ''}{song.formatted_duration}**] [**{insert}**]",
+                color=EmbedColor.GREEN
+            )
+            await ctx.followup.send(embed=embed)
+
+        await self._update_play_message(ctx)
+
+    @commands.slash_command(description="Skips to the next, or to the specified, song in the queue")
+    @discord.option(name="to", description="The position in queue you wish to skip to", min_value=1, required=False)
+    async def skip(self, ctx: discord.ApplicationContext, to: int = 1):
+        if not (ctx.voice_client and ctx.voice_client.is_playing()):
+            embed = discord.Embed(
+                description=f"**Error:** Nothing is currently playing.",
+                color=EmbedColor.RED
+            )
+            return await ctx.respond(embed=embed, ephemeral=True)
+        elif not ctx.user.voice or ctx.user.voice.channel != ctx.voice_client.channel:
+            embed = discord.Embed(
+                description=f"**Note:** Please connect to the voice channel first.",
+                color=EmbedColor.BLUE
+            )
+            return await ctx.respond(embed=embed, ephemeral=True)
+        
+        queue = self.queue[ctx.guild.id]
+        to = min(to, max(1, len(queue) - 1))
+        current_song = queue.songs[0]
+        if to != 1: del queue.songs[1:to]
+
+        ctx.voice_client.stop()
+        request_type = getattr(ctx, "_request_type", None)
+
+        embed = discord.Embed(
+            description=f"**↷ Skipped current song:** {current_song.title}" + (f"\n+ **{to - 1}** more..." if to != 1 else ""),
+            color=EmbedColor.BLUE
+        )
+        if request_type:
+            embed.set_footer(text=f"Requested via a {request_type} [{ctx.user.name}]")
             await ctx.send(embed=embed)
         else:
             await ctx.respond(embed=embed)
 
-        await ctx.voice_client.disconnect()
-        await self.cleanup(ctx)
-
-    @commands.slash_command(description="Adds and plays songs in the queue")
-    @discord.option(name="query",
-                    description="The song that you want to play (SoundCloud/Spotify/YouTube URL, or query)",
-                    required=True)
-    @discord.option(name="insert", description="Add the song to the given position in queue", required=False)
-    @discord.option(name="pre_shuffle", description="Shuffle the songs of the playlist ahead of time", required=False)
-    @discord.option(name="start_at", description="Sets the song to start from the given timestamp", required=False)
-    @discord.option(name="ignore_live", description="Attempts to ignore songs with '(live)' in their name",
-                    required=False)
-    async def play(self, ctx: discord.ApplicationContext, query: str, insert: int = None, pre_shuffle: bool = False,
-                   start_at: str = None, ignore_live: bool = False):
-        try:
-            await ctx.defer()
-        except (discord.ApplicationCommandInvokeError, discord.InteractionResponded, discord.NotFound):
-            pass
-
-        channel = await self.connect_handling(ctx, play=True)
-
-        if not channel:
-            if not ctx.voice_client:
-                await self.cleanup(ctx)
-            return
-
-        self.text_channel[ctx.guild.id] = ctx.channel.id
-
-        insert = max(1, min(insert, len(self.queue[ctx.guild.id]))) if insert else None
-        add_success = True
-
-        if start_at and not validate_timestamp(start_at):
-            embed = discord.Embed(
-                description="**Note:** Invalid timestamp format (hh:mm:ss). Defaulting to 0:00.",
-                color=discord.Color.blue()
-            )
-            await ctx.respond(embed=embed)
-            start_at = None
-
-        if re.match(Constants.URL_REGEX, query) and not validate_url(query):
-            embed = discord.Embed(
-                description="**Error:** Invalid URL.",
-                color=discord.Color.red()
-            )
-            await ctx.respond(embed=embed)
-            return
-        elif re.match(Constants.URL_REGEX, query) and validate_url(query):
-            if "youtu" in query and "list=" in query:
-                playlist_url = Constants.YOUTUBE_PLAYLIST_URL.format(query.split("list=")[1])
-                playlist_entries = Playlist(playlist_url)
-
-                try:
-                    await self.playlist_addition_handling(ctx, list(playlist_entries), playlist_entries.title, query,
-                                                          has_urls=True, pre_shuffle=pre_shuffle)
-                except KeyError:
-                    embed = discord.Embed(
-                        description=f"**Note:** Unsupported playlist type; adding first song to queue.",
-                        color=discord.Color.blue()
-                    )
-                    await ctx.respond(embed=embed)
-
-                    await self.song_addition_handling(ctx,
-                                                      f"www.youtube.com/watch?v={query.split('?v=')[-1].split('&')[0]}",
-                                                      is_url=True, insert=insert, start_at=start_at)
-            elif "spotify.com/playlist" in query:
-                try:
-                    spotify_result = Constants.SPOTIFY.playlist_items(playlist_id=query)
-                    playlist_name = Constants.SPOTIFY.playlist(playlist_id=query, fields="name")["name"]
-                except SpotifyException:
-                    embed = discord.Embed(
-                        description=f"**Error:** Invalid Spotify URL.",
-                        color=discord.Color.red()
-                    )
-                    await ctx.respond(embed=embed)
-                    return
-
-                playlist_entries = await self.get_spotify_tracks(spotify_result, is_playlist=True)
-                await self.playlist_addition_handling(ctx, playlist_entries, playlist_name, query,
-                                                      pre_shuffle=pre_shuffle, type_=Sources.SPOTIFY)
-            elif "spotify.com/album" in query:
-                try:
-                    spotify_result = Constants.SPOTIFY.album_tracks(album_id=query)
-                    playlist_name = Constants.SPOTIFY.album(album_id=query)["name"]
-                except SpotifyException:
-                    embed = discord.Embed(
-                        description=f"**Error:** Invalid Spotify URL.",
-                        color=discord.Color.red()
-                    )
-                    await ctx.respond(embed=embed)
-                    return
-
-                playlist_entries = await self.get_spotify_tracks(spotify_result)
-                await self.playlist_addition_handling(ctx, playlist_entries, playlist_name, query,
-                                                      ignore_live=ignore_live, pre_shuffle=pre_shuffle,
-                                                      type_=Sources.SPOTIFY)
-            elif "spotify.com/track" in query:
-                try:
-                    spotify_result = Constants.SPOTIFY.track(track_id=query)
-                except SpotifyException:
-                    embed = discord.Embed(
-                        description=f"**Error:** Invalid Spotify URL.",
-                        color=discord.Color.red()
-                    )
-                    await ctx.respond(embed=embed)
-                    return
-
-                try:
-                    if spotify_result["album"]["artists"][0]["name"] != "Various Artists":
-                        spotify_query = f"{spotify_result['album']['artists'][0]['name']} - {spotify_result['name']}"
-                    else:
-                        spotify_query = spotify_result["name"]
-                except IndexError:
-                    spotify_query = spotify_result["name"]
-
-                add_success = await self.song_addition_handling(ctx, spotify_query, insert=insert,
-                                                                ignore_live=ignore_live, start_at=start_at,
-                                                                type_=Sources.SPOTIFY)
-            elif "soundcloud.com/" in query:
-                soundcloud_result = Constants.SOUNDCLOUD.resolve(query)
-
-                if isinstance(soundcloud_result, SCTrack):
-                    soundcloud_query = f"{soundcloud_result.artist} - {soundcloud_result.title}"
-                    add_success = await self.song_addition_handling(ctx, soundcloud_query, insert=insert,
-                                                                    ignore_live=ignore_live, start_at=start_at,
-                                                                    type_=Sources.SOUNDCLOUD)
-                elif isinstance(soundcloud_result, SCPlaylist):
-                    playlist_entries = [f"{track.artist} - {track.title}" for track in soundcloud_result]
-                    await self.playlist_addition_handling(ctx, playlist_entries, soundcloud_result.title, query,
-                                                          ignore_live=ignore_live, pre_shuffle=pre_shuffle,
-                                                          type_=Sources.SOUNDCLOUD)
-                else:
-                    embed = discord.Embed(
-                        description=f"**Error:** Invalid SoundCloud URL.",
-                        color=discord.Color.red()
-                    )
-                    await ctx.respond(embed=embed)
-                    return
-            else:
-                await self.song_addition_handling(ctx, query, is_url=True, insert=insert, start_at=start_at)
-        else:
-            add_success = await self.song_addition_handling(ctx, query, insert=insert, ignore_live=ignore_live,
-                                                            start_at=start_at)
-
-        if not add_success:
-            return
-
-        await self.populate_select_menu(ctx)
-
-        if not (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()):
-            self.booleans[ctx.guild.id]["first"] = True
-            dur = self.queue[ctx.guild.id][0].duration
-
-            try:
-                response = Constants.YOUTUBE.channels().list(part="snippet",
-                                                             id=self.queue[ctx.guild.id][0].uploader_id).execute()
-                uploader_picture_url = response["items"][0]["snippet"]["thumbnails"]["high"]["url"]
-            except (IndexError, googleapiclient.errors.HttpError):
-                uploader_picture_url = None
-
-            now_playing_msg = (
-                f"**♪ Now playing:** " if self.loop[ctx.guild.id]["mode"] == "Disabled" else
-                f"**∞ Now looping:** " if self.loop[ctx.guild.id]["mode"] == "Single" else f"**∞ Now in loop:** "
-            )
-            next_in_queue_msg = (
-                f"**Next in {'loop' if self.loop[ctx.guild.id]['mode'] == 'Queue' else 'queue'}:** "
-                f"[{self.queue[ctx.guild.id][1].title}]({self.queue[ctx.guild.id][1].url})"
-                if len(self.queue[ctx.guild.id]) > 1 else "**Note:** No further songs in queue."
-            )
-            embed = discord.Embed(
-                description=f"{now_playing_msg}[{self.queue[ctx.guild.id][0].title}]({self.queue[ctx.guild.id][0].url})"
-                            f" [**{f'{format_timestamp(start_at, timestamp_to_seconds(dur))} -> ' if start_at else ''}"
-                            f"{format_timestamp(dur)}**] [**{len(self.previous[ctx.guild.id]) + 1} | "
-                            f"{len(self.queue[ctx.guild.id]) + len(self.previous[ctx.guild.id])}**]\n"
-                            f"{next_in_queue_msg}",
-                color=discord.Color.dark_green()
-            )
-            embed.set_footer(text=self.queue[ctx.guild.id][0].uploader, icon_url=uploader_picture_url)
-
-            if self.speech_invoker[ctx.guild.id]:
-                self.messages[ctx.guild.id]["main"] = await ctx.send(embed=embed, view=self.resolve_view(ctx))
-            else:
-                self.messages[ctx.guild.id]["main"] = await ctx.respond(embed=embed, view=self.resolve_view(ctx))
-
-            await self.play_next(ctx)
-
     @commands.slash_command(description="Removes songs from the queue")
-    @discord.option(name="from_",
-                    description="The start position of the queue removal, or positions separated by semicolons "
-                                "(i.e. pos1;pos2;...)", required=True)
-    @discord.option(name="to", description="The end position of the queue removal", required=False)
-    async def remove(self, ctx: discord.ApplicationContext, from_: str, to: int = None):
-        try:
-            await ctx.defer()
-        except (discord.ApplicationCommandInvokeError, discord.InteractionResponded):
-            pass
+    @discord.option(name="from_", description="The start position of the queue removal, or positions separated by semicolons (i.e. pos1;pos2;...)", required=True)
+    @discord.option(name="to", description="The end position of the queue removal", min_value=1, required=False)
+    async def remove(self, ctx: discord.ApplicationContext, from_: str, to: int = 0):
+        if not ctx.interaction.response.is_done(): await ctx.defer()
 
-        if not ctx.voice_client:
+        queue = self.queue[ctx.guild.id]
+
+        if not ctx.voice_client or queue.empty():
             embed = discord.Embed(
-                description="**Error:** Queue is empty.",
-                color=discord.Color.red()
+                description=f"**Error:** Queue is already empty.",
+                color=EmbedColor.RED
             )
-            await ctx.respond(embed=embed)
-            return
-
-        queue_length = len(self.queue[ctx.guild.id]) - 1
-
+            return await ctx.followup.send(embed=embed, ephemeral=True)
+        elif not ctx.user.voice or ctx.user.voice.channel != ctx.voice_client.channel:
+            embed = discord.Embed(
+                description=f"**Note:** Please connect to the voice channel first.",
+                color=EmbedColor.BLUE
+            )
+            return await ctx.followup.send(embed=embed, ephemeral=True)
+        
         if not from_.isdigit():
-            split_positions = from_.split(";")
+            split_indices = from_.split(";")
+    
+            indices = sorted({max(1, min(int(i), len(queue) - 1)) for i in split_indices if i.strip().isdigit()}, reverse=True)
 
-            if any([not position.isdigit() for position in split_positions]):
+            if not indices: 
                 embed = discord.Embed(
-                    description="**Error:** Invalid position format (pos1;pos2;...).",
-                    color=discord.Color.red()
+                    description=f"**Error:** Invalid positions provided (pos1;pos2;...).",
+                    color=EmbedColor.RED
                 )
-                await ctx.respond(embed=embed)
+                return await ctx.followup.send(embed=embed, ephemeral=True)
+            
+            request_type = getattr(ctx, "_request_type", None)
+
+            if request_type:
+                if not queue.messages["remove_content"]: queue.messages["remove_content"] = "**⊝ Removed the following song(s) from queue:**"
+
+                removed_song_count = queue.messages["remove_content"].count("\n")
+                queue.messages["remove_content"] += f"\n[**{removed_song_count + 1}**] {queue.songs[1].title}"
+                del queue.songs[1]
+
+                await self._update_play_message(ctx)
+
+                embed = discord.Embed(
+                    description=queue.messages["remove_content"],
+                    color=EmbedColor.DARK_RED
+                )
+                embed.set_footer(text=f"Requested via a {request_type} [{ctx.user.name}]")
+                if queue.messages["remove"]:
+                    try:
+                        return await queue.messages["remove"].edit(embed=embed)
+                    except discord.NotFound:
+                        pass
+                queue.messages["remove"] = await ctx.send(embed=embed)
                 return
+            
+            removed_songs = "\n".join([f"[**{i}**] {queue.songs[i].title}" for i in indices])
 
-            removed_positions = set([max(1, min(int(pos), queue_length)) for pos in map(int, split_positions)])
-            removed_songs = ""
+            for i in indices:
+                del queue.songs[i]
 
-            for i, k in enumerate(removed_positions):
-                removed_songs += f"[**{k}**] {self.queue[ctx.guild.id].pop(k - i)}\n"
-
+            await self._update_play_message(ctx)
+            
             embed = discord.Embed(
                 description=f"**⊝ Removed the following song(s) from queue:**\n{removed_songs}",
-                color=discord.Color.dark_red()
+                color=EmbedColor.DARK_RED
             )
-            await ctx.respond(embed=embed)
-            return
+            return await ctx.followup.send(embed=embed)
+        
+        new_from_ = max(1, min(int(from_), len(queue) - 1))
+        to = min(to or new_from_, len(queue) - 1)
+        if new_from_ > to: new_from_, to = to, new_from_
 
-        from_ = max(1, min(int(from_), queue_length))
-        to = from_ if not to else max(1, min(to, queue_length))
-        from_, to = ((from_, to) if from_ < to else (to, from_)) if to != 0 else (from_, to)
-        removed_song = self.queue[ctx.guild.id][from_]
+        removed_song = queue.songs[new_from_]
+        del queue.songs[new_from_:to + 1]
 
-        removed_msg = (
-            f"**⊝ Removed song:** {removed_song} [**{from_}**]\n" if from_ == to else
-            f"Removed **{to + 1 - from_}** songs from the queue. [**{from_}-{to}**]\n"
+        await self._update_play_message(ctx)   
+
+        embed = discord.Embed(
+            description=f"**⊝ Removed song:** {removed_song.title} [**{from_}**]" + (f"\n+ **{to - new_from_}** more..." if new_from_ != to else ""),
+            color=EmbedColor.DARK_RED
         )
-        del self.queue[ctx.guild.id][from_:to + 1]
-
-        if self.button_invoker[ctx.guild.id]:
-            self.removed[ctx.guild.id].append(f"[**{len(self.removed[ctx.guild.id]) + 1}**] {removed_song}")
-            joined_removed_songs = "\n".join(self.removed[ctx.guild.id])
-
-            embed = discord.Embed(
-                description=f"**⊝ Removed the following song(s) from queue:**\n{joined_removed_songs}",
-                color=discord.Color.dark_red()
-            )
-            embed.set_footer(text=f"Requested via a button [{self.button_invoker[ctx.guild.id]}]")
-
-            if self.messages[ctx.guild.id]["remove"]:
-                try:
-                    await self.messages[ctx.guild.id]["remove"].edit(embed=embed)
-                except discord.errors.NotFound:
-                    self.messages[ctx.guild.id]["remove"] = await ctx.send(embed=embed)
-            else:
-                self.messages[ctx.guild.id]["remove"] = await ctx.send(embed=embed)
-        else:
-            embed = discord.Embed(
-                description=f"{removed_msg}",
-                color=discord.Color.dark_red()
-            )
-            await ctx.respond(embed=embed)
-
-        await self.refresh_main_embed(ctx)
+        await ctx.followup.send(embed=embed)
 
     @commands.slash_command(description="Clears the queue")
-    @discord.option(name="from_", description="The start position of the queue clear", required=False)
+    @discord.option(name="from_", description="The start position of the queue clear", min_value=1, required=False)
     async def clear(self, ctx: discord.ApplicationContext, from_: int = 1):
-        await self.remove(ctx, str(from_), len(self.queue[ctx.guild.id]))
+        await self.remove(ctx, str(from_), max(1, len(self.queue[ctx.guild.id])))
 
-    @commands.slash_command(description="Skips to the next, or to the specified, song in the queue")
-    @discord.option(name="to", description="The position in queue you wish to skip to", required=False)
-    async def skip(self, ctx: discord.ApplicationContext, to: int = None):
-        try:
-            await ctx.defer()
-        except (discord.ApplicationCommandInvokeError, discord.InteractionResponded):
-            pass
+    @commands.slash_command(description="Shuffles the queue")
+    @discord.option(name="from_", description="The start position of the queue shuffle", min_value=1, required=False)
+    @discord.option(name="to", description="The end position of the queue shuffle", min_value=1, required=False)
+    async def shuffle(self, ctx: discord.ApplicationContext, from_: int = 1, to: int = 0):
+        queue = self.queue[ctx.guild.id]
 
-        if not ctx.voice_client or not self.queue[ctx.guild.id]:
-            if not self.speech_invoker[ctx.guild.id]:
-                embed = discord.Embed(
-                    description="**Error:** Nothing is currently playing.",
-                    color=discord.Color.red()
-                )
-                await ctx.respond(embed=embed)
-            return
-
-        queue_length = len(self.queue[ctx.guild.id]) - 1
-        to = 1 if not to or self.loop[ctx.guild.id]["mode"] == "Single" else max(1, min(to, queue_length))
-
-        if ctx.voice_client.is_playing() and to == 1:
+        if not ctx.voice_client or queue.empty():
             embed = discord.Embed(
-                description=f"**↷ Skipping current song:** {self.queue[ctx.guild.id][0]}",
-                color=discord.Color.blurple()
+                description=f"**Error:** Queue is empty.",
+                color=EmbedColor.RED
             )
-            if self.button_invoker[ctx.guild.id]:
-                embed.set_footer(text=f"Requested via a button [{self.button_invoker[ctx.guild.id]}]")
-
-                if self.messages[ctx.guild.id]["skip"]:
-                    try:
-                        await self.messages[ctx.guild.id]["skip"].edit(embed=embed)
-                    except discord.errors.NotFound:
-                        self.messages[ctx.guild.id]["skip"] = await ctx.send(embed=embed)
-                else:
-                    self.messages[ctx.guild.id]["skip"] = await ctx.send(embed=embed)
-            elif self.speech_invoker[ctx.guild.id]:
-                embed.set_footer(text=f"Requested via a voice command [{self.speech_invoker[ctx.guild.id]}]")
-
-                if self.messages[ctx.guild.id]["skip"]:
-                    try:
-                        await self.messages[ctx.guild.id]["skip"].edit(embed=embed)
-                    except discord.errors.NotFound:
-                        self.messages[ctx.guild.id]["skip"] = await ctx.send(embed=embed)
-                else:
-                    self.messages[ctx.guild.id]["skip"] = await ctx.send(embed=embed)
-            else:
-                await ctx.respond(embed=embed)
-
-            ctx.voice_client.stop()
-        elif ctx.voice_client.is_playing() and to != 1:
+            return await ctx.respond(embed=embed, ephemeral=True)
+        elif not ctx.user.voice or ctx.user.voice.channel != ctx.voice_client.channel:
             embed = discord.Embed(
-                description=f"**↷ Skipping current song:** {self.queue[ctx.guild.id][0]}\n"
-                            f"+ **{to - 1}** more...",
-                color=discord.Color.blurple()
+                description=f"**Note:** Please connect to the voice channel first.",
+                color=EmbedColor.BLUE
             )
-            await ctx.respond(embed=embed)
+            return await ctx.respond(embed=embed, ephemeral=True)
+        
+        from_, to = min(from_, len(queue) - 1), min(to or len(queue) - 1, len(queue) - 1)
+        if from_ > to: from_, to = to, from_
 
-            del self.queue[ctx.guild.id][:to - 1]
-            ctx.voice_client.stop()
+        queue.songs[from_:to + 1] = random.sample(queue.songs[from_:to + 1], to - from_ + 1)
+
+        embed = discord.Embed(
+            description=f"**⤮ Shuffled {to - from_ + 1}** song(s) in queue. [**{from_}-{to}**]",
+            color=EmbedColor.PURPLE
+        )
+        await ctx.respond(embed=embed)
+
+    @commands.slash_command(description="Moves the song to the specified position in the queue")
+    @discord.option(name="from_", description="The current position of the song in queue", min_value=1, required=True)
+    @discord.option(name="to", description="The position in queue you wish to move the song to", min_value=1, required=True)
+    @discord.option(name="replace", description="Replace the song in the target position", required=False)
+    async def move(self, ctx: discord.ApplicationContext, from_: int, to: int, replace: bool = False):
+        queue = self.queue[ctx.guild.id]
+
+        if not ctx.voice_client or queue.empty():
+            embed = discord.Embed(
+                description=f"**Error:** Queue is empty.",
+                color=EmbedColor.RED
+            )
+            return await ctx.respond(embed=embed, ephemeral=True)
+        elif not ctx.user.voice or ctx.user.voice.channel != ctx.voice_client.channel:
+            embed = discord.Embed(
+                description=f"**Note:** Please connect to the voice channel first.",
+                color=EmbedColor.BLUE
+            )
+            return await ctx.respond(embed=embed, ephemeral=True)
+        
+        from_, to = min(from_, len(queue) - 1), min(to, len(queue) - 1)
+        replaced_song, moved_song = queue.songs[to], queue.songs.pop(from_)
+        
+        if replace:
+            queue.songs[to] = moved_song
+
+            await self._update_play_message(ctx)   
         else:
+            queue.songs.insert(to, moved_song)
+
+        embed = discord.Embed(
+            description=f"**⇄ Moved song:**: {moved_song.title} [**{from_}**] -> [**{to}**]" + (f"\n**⊝ Replaced song:** {replaced_song.title}" if replace else ""),
+            color=EmbedColor.PURPLE
+        )
+        await ctx.respond(embed=embed)
+
+    @commands.slash_command(description="Loops either the song or the entire queue")
+    @discord.option(name="mode", description="The loop mode you wish to use", choices=["Disabled", "Single", "Queue"], required=True)
+    async def loop(self, ctx: discord.ApplicationContext, mode: str):
+        if not ctx.interaction.response.is_done(): await ctx.defer()
+        
+        if not ctx.voice_client:
             embed = discord.Embed(
-                description="**Error:** Nothing is currently playing.",
-                color=discord.Color.red()
+                description=f"**Error:** Not connected to a voice channel.",
+                color=EmbedColor.RED
             )
-            if self.button_invoker[ctx.guild.id]:
-                embed.set_footer(text=f"Requested via a button [{self.button_invoker[ctx.guild.id]}]")
+            return await ctx.followup.send(embed=embed, ephemeral=True)
+        elif not ctx.user.voice or ctx.user.voice.channel != ctx.voice_client.channel:
+            embed = discord.Embed(
+                description=f"**Note:** Please connect to the voice channel first.",
+                color=EmbedColor.BLUE
+            )
+            return await ctx.followup.send(embed=embed, ephemeral=True)
+        
+        queue = self.queue[ctx.guild.id]
+        queue.loop = mode
 
-                if self.messages[ctx.guild.id]["skip"]:
-                    try:
-                        await self.messages[ctx.guild.id]["skip"].edit(embed=embed)
-                    except discord.errors.NotFound:
-                        self.messages[ctx.guild.id]["skip"] = await ctx.send(embed=embed)
-                else:
-                    self.messages[ctx.guild.id]["skip"] = await ctx.send(embed=embed)
-            else:
-                await ctx.respond(embed=embed)
+        await self._update_play_message(ctx)
+        request_type = getattr(ctx, "_request_type", None)
 
-    @commands.slash_command(description="Displays songs in queue, with the ability to seek them")
-    @discord.option(name="to", description="The end position of the queue display", required=False)
-    @discord.option(name="from_", description="The start position of the queue display", required=False)
-    @discord.option(name="seek", description="Seek songs via given keywords", required=False)
-    @discord.option(name="previous", description="Whether to view the previous queue instead", required=False)
-    async def view(self, ctx: discord.ApplicationContext, to: int = None, from_: int = 1, seek: str = None,
-                   previous: bool = False):
-        await ctx.defer()
+        embed = discord.Embed(
+            description=f"**⟳ Set loop mode to:** {mode}",
+            color=EmbedColor.BLUE
+        )
+        if request_type:
+            embed.set_footer(text=f"Requested via a {request_type} [{ctx.user.name}]")
+            if queue.messages["loop"]:
+                try:
+                    return await queue.messages["loop"].edit(embed=embed)
+                except discord.NotFound:
+                    pass
+            queue.messages["loop"] = await ctx.send(embed=embed)
+        else:
+            queue.messages["loop"] = await ctx.followup.send(embed=embed)
+
+    @commands.slash_command(description="Toggles autoplay for the queue")
+    async def autoplay(self, ctx: discord.ApplicationContext):
+        if not ctx.voice_client:
+            embed = discord.Embed(
+                description=f"**Error:** Not connected to a voice channel.",
+                color=EmbedColor.RED
+            )
+            return await ctx.respond(embed=embed, ephemeral=True)
+        elif not ctx.user.voice or ctx.user.voice.channel != ctx.voice_client.channel:
+            embed = discord.Embed(
+                description=f"**Note:** Please connect to the voice channel first.",
+                color=EmbedColor.BLUE
+            )
+            return await ctx.respond(embed=embed, ephemeral=True)
+        
+        queue = self.queue[ctx.guild.id]
+        queue.autoplay = not queue.autoplay
+
+        embed = discord.Embed(
+            description=f"**⮓ Set autoplay to:** {'Enabled' if queue.autoplay else 'Disabled'}",
+            color=EmbedColor.PURPLE
+        )
+        await ctx.respond(embed=embed)
+
+    @commands.slash_command(description="Sets the music player volume")
+    @discord.option(name="level", description="Set the volume level percentage (100 by default)", min_value=0, max_value=200, required=True)
+    async def volume(self, ctx: discord.ApplicationContext, level: int):
+        if not ctx.interaction.response.is_done(): await ctx.defer()
 
         if not ctx.voice_client:
             embed = discord.Embed(
-                description=f"{'Previous queue' if previous else 'Queue'} is empty.",
-                color=discord.Color.dark_gold()
+                description=f"**Error:** Not connected to a voice channel.",
+                color=EmbedColor.RED
             )
-            await ctx.respond(embed=embed)
-            return
-
-        queue_length = len(self.queue[ctx.guild.id]) - 1 if not previous else len(self.previous[ctx.guild.id])
-        to = (min(10, queue_length) if not to else max(1, min(to, queue_length))) if not seek else queue_length
-        from_ = max(1, min(from_, queue_length)) if not seek else 1
-        from_, to = ((from_, to) if from_ < to else (to, from_)) if to != 0 else (from_, to)
-
-        queue_songs = ""
-        displayed_song_count = to + 1 - from_
-        for i, k in enumerate(self.queue[ctx.guild.id][from_:to + 1] if not previous else
-                              self.previous[ctx.guild.id][from_ - 1:to]):
-            if not seek:
-                queue_songs += (f"[**{from_ + i}**] {k} "
-                                f"[**{f'{seconds_to_timestamp(k.start)} -> ' if k.start else ''}"
-                                f"{format_timestamp(k.duration)}**]\n")
-            elif seek and seek.lower() in k.title.lower():
-                queue_songs += (f"[**{from_ + i}**] {k} "
-                                f"[**{f'{seconds_to_timestamp(k.start)} -> ' if k.start else ''}"
-                                f"{format_timestamp(k.duration)}**]\n")
-
-            if len(queue_songs) >= 3952:
-                displayed_song_count = i + 1
-                break
-
-        queue_durations = [timestamp_to_seconds(k.duration if not k.start else seconds_to_timestamp(
-                timestamp_to_seconds(k.duration) - k.start)) for k in self.queue[ctx.guild.id][1:]] if \
-            not previous else [timestamp_to_seconds(k.duration if not k.start else seconds_to_timestamp(
-                timestamp_to_seconds(k.duration) - k.start)) for k in self.previous[ctx.guild.id]]
-        additional_songs_count = queue_length - displayed_song_count
-        additional_songs_msg = f"+ **{additional_songs_count}** more...\n\n" if additional_songs_count else "\n"
-
-        if queue_songs and not seek:
+            return await ctx.followup.send(embed=embed, ephemeral=True)
+        elif not ctx.user.voice or ctx.user.voice.channel != ctx.voice_client.channel:
             embed = discord.Embed(
-                description=f"**\👁 In{' previous' if previous else ''} queue:**\n{queue_songs}{additional_songs_msg}"
-                            f"**In total: {queue_length}** song(s) "
-                            f"[**{seconds_to_timestamp(sum(queue_durations))}**]",
-                color=discord.Color.dark_gold()
+                description=f"**Note:** Please connect to the voice channel first.",
+                color=EmbedColor.BLUE
             )
-        elif queue_songs and seek:
-            embed = discord.Embed(
-                description=f"**\👁 In{' previous' if previous else ''} queue matching `{seek}`:**\n{queue_songs}\n"
-                            f"**In total: {queue_length}** song(s) "
-                            f"[**{seconds_to_timestamp(sum(queue_durations))}**]",
-                color=discord.Color.dark_gold()
-            )
-        elif not queue_songs and seek:
-            embed = discord.Embed(
-                description=f"**\👁 In{' previous' if previous else ''} queue matching `{seek}`:**\nNo songs found.\n\n"
-                            f"**In total: {queue_length}** song(s) "
-                            f"[**{seconds_to_timestamp(sum(queue_durations))}**]",
-                color=discord.Color.dark_gold()
-            )
+            return await ctx.followup.send(embed=embed, ephemeral=True)
+        
+        queue = self.queue[ctx.guild.id]
+        queue.volume = max(0, min(200, round(level / 100, 2)))
+        if ctx.voice_client.is_playing() and queue.songs[0].player: queue.songs[0].player.volume = queue.volume
+        request_type = getattr(ctx, "_request_type", None)
+
+        embed = discord.Embed(
+            description=f"**🕪 Set volume to:** {level} %",
+            color=EmbedColor.BLUE
+        )
+        if request_type:
+            embed.set_footer(text=f"Requested via a {request_type} [{ctx.user.name}]")
+            if queue.messages["volume"]:
+                try:
+                    return await queue.messages["volume"].edit(embed=embed)
+                except discord.NotFound:
+                    pass
+            queue.messages["volume"] = await ctx.send(embed=embed)
         else:
-            embed = discord.Embed(
-                description=f"{'Previous queue' if previous else 'Queue'} is empty.",
-                color=discord.Color.dark_gold()
-            )
-        if ctx.voice_client.is_playing():
-            filter_mode = self.queue[ctx.guild.id][0].filter_["mode"]
-            filter_intensity = self.queue[ctx.guild.id][0].filter_["intensity"]
-
-            embed.set_footer(text=f"> Now playing: {self.queue[ctx.guild.id][0]} "
-                                  f"[{seconds_to_timestamp(self.count_elapsed_time(ctx))} | "
-                                  f"{format_timestamp(self.queue[ctx.guild.id][0].duration)}]\n"
-                                  f"> Volume: {self.queue[ctx.guild.id][0].source.volume * 100}% | Filter: "
-                                  f"{filter_mode} {f'[{filter_intensity}%]' if filter_mode != 'Disabled' else ''} | "
-                                  f"Loop: {self.loop[ctx.guild.id]['mode']} | Autoplay: {self.autoplay[ctx.guild.id]}")
-        await ctx.respond(embed=embed)
+            queue.messages["volume"] = await ctx.followup.send(embed=embed)
 
     @commands.slash_command(description="Toggles pause for the current song")
     async def pause(self, ctx: discord.ApplicationContext):
-        try:
-            await ctx.defer()
-        except (discord.ApplicationCommandInvokeError, discord.InteractionResponded):
-            pass
+        if not ctx.interaction.response.is_done(): await ctx.defer()
 
-        if not ctx.voice_client or not self.queue[ctx.guild.id]:
-            if not self.speech_invoker[ctx.guild.id]:
-                embed = discord.Embed(
-                    description="**Error:** Nothing is currently playing.",
-                    color=discord.Color.red()
-                )
-                await ctx.respond(embed=embed)
-            return
-
-        if not ctx.voice_client.is_paused():
-            embed = discord.Embed(
-                description=f"**❚❚ Pausing current song:** {self.queue[ctx.guild.id][0]}",
-                color=discord.Color.blurple()
-            )
-            if self.button_invoker[ctx.guild.id]:
-                embed.set_footer(text=f"Requested via a button [{self.button_invoker[ctx.guild.id]}]")
-
-                if self.messages[ctx.guild.id]["pause"]:
-                    try:
-                        await self.messages[ctx.guild.id]["pause"].edit(embed=embed)
-                    except discord.errors.NotFound:
-                        self.messages[ctx.guild.id]["pause"] = await ctx.send(embed=embed)
-                else:
-                    self.messages[ctx.guild.id]["pause"] = await ctx.send(embed=embed)
-            elif self.speech_invoker[ctx.guild.id]:
-                embed.set_footer(text=f"Requested via a voice command [{self.speech_invoker[ctx.guild.id]}]")
-
-                if self.messages[ctx.guild.id]["pause"]:
-                    try:
-                        await self.messages[ctx.guild.id]["pause"].edit(embed=embed)
-                    except discord.errors.NotFound:
-                        self.messages[ctx.guild.id]["pause"] = await ctx.send(embed=embed)
-                else:
-                    self.messages[ctx.guild.id]["pause"] = await ctx.send(embed=embed)
-            else:
-                await ctx.respond(embed=embed)
-
-            ctx.voice_client.pause()
-            self.elapsed_time[ctx.guild.id]["pause_start"] = time.time()
-            self.gui[ctx.guild.id]["pause"].style = discord.ButtonStyle.primary
-
-            if self.messages[ctx.guild.id]["main"] and not self.button_invoker[ctx.guild.id]:
-                try:
-                    await self.messages[ctx.guild.id]["main"].edit(view=self.resolve_view(ctx))
-                except (discord.NotFound, discord.HTTPException):
-                    pass
-            return
-
-        embed = discord.Embed(
-            description=f"**⯈ Resuming current song:** {self.queue[ctx.guild.id][0]}",
-            color=discord.Color.blurple()
-        )
-        if self.button_invoker[ctx.guild.id]:
-            embed.set_footer(text=f"Requested via a button [{self.button_invoker[ctx.guild.id]}]")
-
-            if self.messages[ctx.guild.id]["pause"]:
-                try:
-                    await self.messages[ctx.guild.id]["pause"].edit(embed=embed)
-                except discord.errors.NotFound:
-                    self.messages[ctx.guild.id]["pause"] = await ctx.send(embed=embed)
-            else:
-                self.messages[ctx.guild.id]["pause"] = await ctx.send(embed=embed)
-        elif self.speech_invoker[ctx.guild.id]:
-            embed.set_footer(text=f"Requested via a voice command [{self.speech_invoker[ctx.guild.id]}]")
-
-            if self.messages[ctx.guild.id]["pause"]:
-                try:
-                    await self.messages[ctx.guild.id]["pause"].edit(embed=embed)
-                except discord.errors.NotFound:
-                    self.messages[ctx.guild.id]["pause"] = await ctx.send(embed=embed)
-            else:
-                self.messages[ctx.guild.id]["pause"] = await ctx.send(embed=embed)
-        else:
-            await ctx.respond(embed=embed)
-
-        ctx.voice_client.resume()
-        self.elapsed_time[ctx.guild.id]["pause"] = time.time() - self.elapsed_time[ctx.guild.id]["pause_start"]
-        self.elapsed_time[ctx.guild.id]["pause_start"] = None
-        self.gui[ctx.guild.id]["pause"].style = discord.ButtonStyle.secondary
-
-        if self.messages[ctx.guild.id]["main"] and not self.button_invoker[ctx.guild.id]:
-            try:
-                await self.messages[ctx.guild.id]["main"].edit(view=self.resolve_view(ctx))
-            except (discord.NotFound, discord.HTTPException):
-                pass
-
-    @commands.slash_command(description="Shuffles the queue")
-    @discord.option(name="from_", description="The start position of the queue shuffle", required=False)
-    @discord.option(name="to", description="The end position of the queue shuffle", required=False)
-    async def shuffle(self, ctx: discord.ApplicationContext, from_: int = None, to: int = None):
-        await ctx.defer()
-
-        if not ctx.voice_client or len(self.queue[ctx.guild.id]) < 2:
-            embed = discord.Embed(
-                description="**Error:** Queue is empty.",
-                color=discord.Color.red()
-            )
-            await ctx.respond(embed=embed)
-            return
-
-        queue_length = len(self.queue[ctx.guild.id]) - 1
-        from_ = 1 if not from_ else max(1, min(from_, queue_length))
-        to = queue_length if not to else max(1, min(to, queue_length))
-        from_, to = ((from_, to) if from_ < to else (to, from_)) if to != 0 else (from_, to)
-
-        self.queue[ctx.guild.id] = (
-                self.queue[ctx.guild.id][:from_] +
-                random.sample(self.queue[ctx.guild.id][from_:to + 1], len(self.queue[ctx.guild.id][from_:to + 1])) +
-                self.queue[ctx.guild.id][to + 1:]
-        )
-        embed = discord.Embed(
-            description=f"**⤮ Shuffled {to + 1 - from_}** song(s) in queue. [**{from_}-{to}**]",
-            color=discord.Color.purple()
-        )
-        await ctx.respond(embed=embed)
-
-        await self.refresh_main_embed(ctx)
-
-    @commands.slash_command(description="Moves the song to the specified position in the queue")
-    @discord.option(name="from_", description="The current position of the song in queue", required=True)
-    @discord.option(name="to", description="The position in queue you wish to move the song to", required=True)
-    @discord.option(name="replace", description="Replaces the song in the target position", required=False)
-    async def move(self, ctx: discord.ApplicationContext, from_: int, to: int, replace: bool = False):
-        await ctx.defer()
-
-        if not ctx.voice_client or len(self.queue[ctx.guild.id]) < 2:
-            embed = discord.Embed(
-                description="**Error:** Queue is empty.",
-                color=discord.Color.red()
-            )
-            await ctx.respond(embed=embed)
-            return
-
-        queue_length = len(self.queue[ctx.guild.id]) - 1
-        from_ = max(1, min(from_, queue_length))
-        to = max(1, min(to, queue_length))
-
-        move_msg = f"**⇄ Moved song:** {self.queue[ctx.guild.id][from_]} [**{from_}**] -> [**{to}**]\n"
-        rpl_msg = f"**⊝ Replaced song:** {self.queue[ctx.guild.id][to]}\n" if replace else ""
-
-        self.queue[ctx.guild.id].insert(to, self.queue[ctx.guild.id].pop(from_))
-        self.queue[ctx.guild.id].pop(to + 1) if replace else None
-
-        embed = discord.Embed(
-            description=f"{move_msg}{rpl_msg}",
-            color=discord.Color.purple()
-        )
-        await ctx.respond(embed=embed)
-
-        if replace or from_ == 1 or to == 1:
-            await self.refresh_main_embed(ctx)
-
-    @commands.slash_command(description="Seek a certain part of the song via timestamp")
-    @discord.option(name="timestamp", description="The timestamp to seek (i.e. hours:minutes:seconds)", required=True)
-    async def seek(self, ctx: discord.ApplicationContext, timestamp: str):
-        await ctx.defer()
-
-        if not ctx.voice_client or not self.queue[ctx.guild.id]:
-            embed = discord.Embed(
-                description="**Error:** Nothing is currently playing.",
-                color=discord.Color.red()
-            )
-            await ctx.respond(embed=embed)
-            return
-        elif self.queue[ctx.guild.id][0].duration == "0:00":
-            embed = discord.Embed(
-                description="**Error:** Cannot seek position in live stream.",
-                color=discord.Color.red()
-            )
-            await ctx.respond(embed=embed)
-            return
-
-        self.booleans[ctx.guild.id]["clear_elapsed"] = False
-        self.booleans[ctx.guild.id]["ignore_msg"] = True
-
-        if not validate_timestamp(timestamp):
-            embed = discord.Embed(
-                description="**Error:** Incorrect timestamp format (hh:mm:ss).",
-                color=discord.Color.red()
-            )
-            await ctx.respond(embed=embed)
-            return
-
-        self.elapsed_time[ctx.guild.id]["seek"] = timestamp_to_seconds(timestamp)
-
-        current_song = self.queue[ctx.guild.id][0]
-        current_song.set_start(timestamp_to_seconds(timestamp))
-        self.queue[ctx.guild.id].insert(0, current_song)
-        dur = self.queue[ctx.guild.id][0].duration
-
-        ctx.voice_client.stop()
-
-        embed = discord.Embed(
-            description=f"**⌕ Sought timestamp:** {format_timestamp(timestamp, timestamp_to_seconds(dur))} | "
-                        f"{self.queue[ctx.guild.id][0].duration}",
-            color=discord.Color.blurple()
-        )
-        await ctx.respond(embed=embed)
-
-    @commands.slash_command(name="filter", description="Applies an audio filter over the songs")
-    @discord.option(name="mode", description="The filter mode you wish to use",
-                    choices=["Disabled", "Nightcore", "BassBoost", "EarRape"], required=True)
-    @discord.option(name="intensity", description="Set the filter intensity percentage (35 by default)", required=False)
-    async def filter_(self, ctx: discord.ApplicationContext, mode: str, intensity: int = None):
-        await ctx.defer()
-
-        if not ctx.voice_client:
-            embed = discord.Embed(
-                description="**Error:** Nothing is currently playing.",
-                color=discord.Color.red()
-            )
-            await ctx.respond(embed=embed)
-            return
-
-        self.booleans[ctx.guild.id]["clear_elapsed"] = False
-        self.booleans[ctx.guild.id]["ignore_msg"] = True
-        intensity = 35 if not intensity else min(max(intensity, 0), 100)
-
-        if mode == "Disabled":
-            self.filters[ctx.guild.id] = {"mode": mode, "value": Constants.FILTERS[mode], "intensity": intensity}
-        elif mode == "Nightcore":
-            self.filters[ctx.guild.id] = {"mode": mode, "value": Constants.FILTERS[mode].format(1 + intensity / 100),
-                                          "intensity": intensity}
-        elif mode == "BassBoost":
-            self.filters[ctx.guild.id] = {"mode": mode, "value": Constants.FILTERS[mode].format(intensity // 5),
-                                          "intensity": intensity}
-        else:
-            self.filters[ctx.guild.id] = {"mode": mode,
-                                          "value": Constants.FILTERS[mode].format(intensity // 5, 1 + ((intensity // 5) * 2)),
-                                          "intensity": intensity}
-
-        current_song = self.queue[ctx.guild.id][0]
-        current_song.set_filter(self.filters[ctx.guild.id])
-        current_song.set_start(self.count_elapsed_time(ctx))
-        self.queue[ctx.guild.id].insert(0, current_song)
-
-        self.elapsed_time[ctx.guild.id]["seek"] = self.queue[ctx.guild.id][0].start
-
-        ctx.voice_client.stop()
-
-        embed = discord.Embed(
-            description=f"**⎘ Filter mode is now:** {mode} {f'[**{intensity}%**]' if mode != 'Disabled' else ''}",
-            color=discord.Color.blurple()
-        )
-        await ctx.respond(embed=embed)
-
-    @commands.slash_command(filter="volume", description="Changes the music player volume")
-    @discord.option(name="level", description="Set the volume level percentage (50 by default)", required=True)
-    async def volume_(self, ctx: discord.ApplicationContext, level: float):
-        try:
-            await ctx.defer()
-        except (discord.ApplicationCommandInvokeError, discord.InteractionResponded):
-            pass
-
-        if not ctx.voice_client:
-            embed = discord.Embed(
-                description="**Error:** Nothing is currently playing.",
-                color=discord.Color.red()
-            )
-            await ctx.respond(embed=embed)
-            return
-
-        level = min(max(level, 0), 200) / 100
-        self.volume[ctx.guild.id] = round(level, 1)
-        self.queue[ctx.guild.id][0].set_volume(self.volume[ctx.guild.id])
-
-        embed = discord.Embed(
-            description=f"**🕪 Volume level is now:** {self.queue[ctx.guild.id][0].source.volume * 100:.1f}%",
-            color=discord.Color.blurple()
-        )
-        if self.button_invoker[ctx.guild.id]:
-            embed.set_footer(text=f"Requested via a button [{self.button_invoker[ctx.guild.id]}]")
-
-            if self.messages[ctx.guild.id]["volume"]:
-                try:
-                    await self.messages[ctx.guild.id]["volume"].edit(embed=embed)
-                except discord.errors.NotFound:
-                    self.messages[ctx.guild.id]["volume"] = await ctx.send(embed=embed)
-            else:
-                self.messages[ctx.guild.id]["volume"] = await ctx.send(embed=embed)
-        else:
-            await ctx.respond(embed=embed)
-
-    @commands.slash_command(description="Replays the previous song from the queue")
-    @discord.option(name="from_", description="Current position of the song in previous queue", required=False)
-    @discord.option(name="insert", description="Add the song to the given position in queue", required=False)
-    @discord.option(name="instant", description="Whether to replay the song instantly", required=False)
-    async def replay(self, ctx: discord.ApplicationContext, from_: int = None, insert: int = None,
-                     instant: bool = False):
-        try:
-            await ctx.defer()
-        except (discord.ApplicationCommandInvokeError, discord.InteractionResponded):
-            pass
-
-        if not ctx.voice_client or not self.previous[ctx.guild.id]:
-            embed = discord.Embed(
-                description="**Error:** No previous songs associated with this queue.",
-                color=discord.Color.red()
-            )
-            await ctx.respond(embed=embed)
-            return
-
-        from_ = len(self.previous[ctx.guild.id]) if not from_ else max(1, min(from_, len(self.previous[ctx.guild.id])))
-        insert = 1 if instant else max(1, len(self.queue[ctx.guild.id])) if not insert else \
-            max(1, min(insert, len(self.queue[ctx.guild.id])))
-
-        previous_song = self.previous[ctx.guild.id].pop(from_ - 1)
-
-        embed = discord.Embed(
-            description=f"**{'⭟ Replaying' if not self.button_invoker[ctx.guild.id] else '↶ Backing to'} song:** "
-                        f"{previous_song} [**{insert}**]",
-            color=discord.Color.purple()
-        )
-        if self.button_invoker[ctx.guild.id]:
-            embed.set_footer(text=f"Requested via a button [{self.button_invoker[ctx.guild.id]}]")
-
-            if self.messages[ctx.guild.id]["replay"]:
-                try:
-                    await self.messages[ctx.guild.id]["replay"].edit(embed=embed)
-                except discord.errors.NotFound:
-                    self.messages[ctx.guild.id]["replay"] = await ctx.send(embed=embed)
-            else:
-                self.messages[ctx.guild.id]["replay"] = await ctx.send(embed=embed)
-        else:
-            await ctx.respond(embed=embed)
-
-        if not (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()) and not self.queue[ctx.guild.id]:
-            await self.play(ctx, query=previous_song.url)
-            return
-
-        self.queue[ctx.guild.id].insert(insert, previous_song)
-
-        if self.button_invoker[ctx.guild.id]:
-            self.booleans[ctx.guild.id]["backed"] = True
-            self.queue[ctx.guild.id].insert(insert + 1, self.queue[ctx.guild.id][0])
-
-        await self.refresh_main_embed(ctx)
-        ctx.voice_client.stop() if instant else None
-
-    @commands.slash_command(description="Get lyrics for the currently playing song")
-    @discord.option(name="title", description="Get lyrics from the specified title instead", required=False)
-    async def lyrics(self, ctx: discord.ApplicationContext, title: str = None):
-        await ctx.defer()
-
-        if not title and (not ctx.voice_client or not ctx.voice_client.is_playing()):
+        if not (ctx.voice_client and (ctx.voice_client.is_playing() or ctx.voice_client.is_paused())):
             embed = discord.Embed(
                 description=f"**Error:** Nothing is currently playing.",
-                color=discord.Color.red(),
+                color=EmbedColor.RED
             )
-            await ctx.respond(embed=embed)
-            return
+            return await ctx.followup.send(embed=embed, ephemeral=True)
+        elif not ctx.user.voice or ctx.user.voice.channel != ctx.voice_client.channel:
+            embed = discord.Embed(
+                description=f"**Note:** Please connect to the voice channel first.",
+                color=EmbedColor.BLUE
+            )
+            return await ctx.followup.send(embed=embed, ephemeral=True)
+        
+        queue = self.queue[ctx.guild.id]
+        song = queue.songs[0]
 
-        formatted_title = re.sub(r"\[[^\[\]]*]|\([^()]*\)", "",
-                                 title if title else self.queue[ctx.guild.id][0].title)
+        if ctx.voice_client.is_playing():
+            setattr(song, "_paused_at", time.time())
+            ctx.voice_client.pause()
+        else:
+            if song.start_time and getattr(song, "_paused_at", None):
+                song.start_time += time.time() - getattr(song, "_paused_at", time.time())
+            else:
+                song.start_time = time.time()
+
+            delattr(song, "_paused_at")
+            ctx.voice_client.resume()
+
+        await self._update_play_message(ctx)
+        request_type = getattr(ctx, "_request_type", None)
+
+        embed = discord.Embed(
+            description=f"**{'⯈ Resumed' if ctx.voice_client.is_playing() else '❚❚ Paused'} current song:** {song.title}",
+            color=EmbedColor.BLUE
+        )
+        if request_type:
+            embed.set_footer(text=f"Requested via a {request_type} [{ctx.user.name}]")
+            if queue.messages["pause"]:
+                try:
+                    return await queue.messages["pause"].edit(embed=embed)
+                except discord.NotFound:
+                    pass
+            queue.messages["pause"] = await ctx.send(embed=embed)
+        else:
+            queue.messages["pause"] = await ctx.followup.send(embed=embed)
+
+    @commands.slash_command(description="Seeks a certain part of the song via a timestamp")
+    @discord.option(name="timestamp", description="The timestamp to seek (i.e. hours:minutes:seconds)", required=True)
+    async def seek(self, ctx: discord.ApplicationContext, timestamp: str):
+        if not (ctx.voice_client and (ctx.voice_client.is_playing() or ctx.voice_client.is_paused())):
+            embed = discord.Embed(
+                description=f"**Error:** Nothing is currently playing.",
+                color=EmbedColor.RED
+            )
+            return await ctx.respond(embed=embed, ephemeral=True)
+        elif not ctx.user.voice or ctx.user.voice.channel != ctx.voice_client.channel:
+            embed = discord.Embed(
+                description=f"**Note:** Please connect to the voice channel first.",
+                color=EmbedColor.BLUE
+            )
+            return await ctx.respond(embed=embed, ephemeral=True)
+        
+        queue = self.queue[ctx.guild.id]
+        current_song = copy.copy(queue.songs[0])
+
+        if not current_song.duration:
+            embed = discord.Embed(
+                description=f"**Error:** Songs without a set duration cannot be sought.",
+                color=EmbedColor.RED
+            )
+            return await ctx.respond(embed=embed, ephemeral=True)
+
+        sought = parse_duration(timestamp, current_song.duration)
+        current_song.start_at = sought or 0
+        setattr(current_song, "_ignore_msg", True)
+        setattr(current_song, "_sought", True)
+
+        setattr(queue.songs[0], "_ignore_add", True)
+        setattr(queue.songs[0], "_ignore_clear", True)
+
+        queue.songs.insert(1, current_song)
+        ctx.voice_client.stop()
+
+        embed = discord.Embed(
+            description=f"**⌕ Sought timestamp:** {format_duration(sought, False)} | {current_song.formatted_duration}",
+            color=EmbedColor.BLUE
+        )
+        await ctx.respond(embed=embed)
+
+    @commands.slash_command(description="Applies an audio filter over the songs")
+    @discord.option(name="mode", description="The filter mode you wish to use", choices=["Disabled", "Nightcore", "BassBoost", "EarRape", "Doomer", "8D"], required=True)
+    @discord.option(name="intensity", description="Set the filter intensity percentage (35 by default)", min_value=0, max_value=100, required=True)
+    async def filter(self, ctx: discord.ApplicationContext, mode: str, intensity: int = -1):
+        if not ctx.voice_client:
+            embed = discord.Embed(
+                description=f"**Error:** Not connected to a voice channel.",
+                color=EmbedColor.RED
+            )
+            return await ctx.respond(embed=embed, ephemeral=True)
+        elif not ctx.user.voice or ctx.user.voice.channel != ctx.voice_client.channel:
+            embed = discord.Embed(
+                description=f"**Note:** Please connect to the voice channel first.",
+                color=EmbedColor.BLUE
+            )
+            return await ctx.respond(embed=embed, ephemeral=True)
+        
+        queue = self.queue[ctx.guild.id]
+        intensity = intensity if intensity != -1 else queue.filter["intensity"]
+
+        filter_values = {
+            "Disabled": "anull",
+            "Nightcore": f"rubberband=pitch={1 + intensity / 100}:tempo=1",
+            "BassBoost": f"bass=g={intensity // 5}",
+            "EarRape": f"acrusher=level_in={intensity // 5}:level_out={1 + ((intensity // 5) * 2)}:bits=8:mode=log:aa=1",
+            "Doomer": f"dynaudnorm=f=200,aecho=1.0:0.5:10:{min(0.99, 0.5 + 0.01 * (intensity - 35))},rubberband=pitch={min(1, 1.15 - intensity / 100)}",
+            "8D": f"apulsator=hz={max(0.01, 2.0 * (1 - math.exp(-0.00146 * intensity))):.2f}"
+        }
+        queue.filter = {"name": mode, "value": filter_values[mode], "intensity": intensity}
+
+        if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
+            current_song = copy.copy(queue.songs[0])
+            current_song.start_at = int(time.time() - current_song.start_time) + current_song.start_at
+            setattr(current_song, "_ignore_msg", True)
+            setattr(current_song, "_sought", True)
+
+            setattr(queue.songs[0], "_ignore_add", True)
+            setattr(queue.songs[0], "_ignore_clear", True)
+
+            queue.songs.insert(1, current_song)
+            ctx.voice_client.stop()
+
+        embed = discord.Embed(
+            description=f"**⎘ Set filter to:** {mode} [**{intensity} %**]",
+            color=EmbedColor.BLUE
+        )
+        await ctx.respond(embed=embed)
+
+    @commands.slash_command(description="Gets lyrics for the currently playing song")
+    @discord.option(name="title", description="Get lyrics from the specified title instead", required=False)
+    async def lyrics(self, ctx: discord.ApplicationContext, title: str = ""):
+        if not title and not (ctx.voice_client and ctx.voice_client.is_playing()):
+            embed = discord.Embed(
+                description=f"**Error:** Nothing is currently playing.",
+                color=EmbedColor.RED
+            )
+            return await ctx.respond(embed=embed, ephemeral=True)
+
+        title = re.sub(r"\[[^\[\]]*]|\([^()]*\)", "", title if title else str(self.queue[ctx.guild.id].songs[0].title))
 
         try:
-            song = Constants.GENIUS.search_song(title=formatted_title, get_full_info=False)
-        except (requests.ReadTimeout, requests.Timeout, discord.ApplicationCommandInvokeError):
+            song = GENIUS.search_song(title=title, get_full_info=False)
+        except discord.ApplicationCommandInvokeError:
             embed = discord.Embed(
                 description=f"**Error:** Request timed out, please try again.",
-                color=discord.Color.red(),
+                color=EmbedColor.RED
             )
-            await ctx.respond(embed=embed)
-            return
+            return await ctx.respond(embed=embed, ephemeral=True)
 
         if not song:
             embed = discord.Embed(
-                description=f"**Error:** No lyrics found for `{formatted_title}`",
-                color=discord.Color.dark_gold(),
+                description=f"**Error:** No lyrics found for `{title}`",
+                color=EmbedColor.YELLOW
             )
-            await ctx.respond(embed=embed)
-            return
+            return await ctx.respond(embed=embed, ephemeral=True)
+
+        split_lyrics = song.lyrics.replace("\n\n\n", "\n\n").split("\n")
+        if match := re.search(r"\[[^\[\]]+\]$", split_lyrics[0]): split_lyrics[0] = match.group()
+        lyrics = "\n".join(split_lyrics)
 
         try:
             embed = discord.Embed(
-                description=f"**☲ {song.title} Lyrics**\n\n{song.lyrics}",
-                color=discord.Color.dark_gold(),
+                description=f"**☲ [{song.title}]({song.url}) Lyrics**\n\n{lyrics}",
+                color=EmbedColor.YELLOW
             )
             await ctx.respond(embed=embed)
         except discord.HTTPException:
             embed = discord.Embed(
-                description=f"**☲ {song.title} Lyrics**\n\nLyrics too long for Discord. [Find them here.]({song.url})",
-                color=discord.Color.dark_gold(),
+                description=f"**☲ [{song.title}]({song.url}) Lyrics**\n\nLyrics too long for Discord. Click on the title to view them.",
+                color=EmbedColor.YELLOW
             )
             await ctx.respond(embed=embed)
 
-    @commands.slash_command(name="loop", description="Loops either the song or the entire queue")
-    @discord.option(name="mode", description="The loop mode you wish to use", choices=["Disabled", "Single", "Queue"],
-                    required=True)
-    async def loop_(self, ctx: discord.ApplicationContext, mode: str):
-        try:
-            await ctx.defer()
-        except (discord.ApplicationCommandInvokeError, discord.InteractionResponded):
-            pass
+    @commands.slash_command(description="Replays previous songs from the queue")
+    @discord.option(name="from_", description="Current position of the song in previous queue", min_value=1, required=False)
+    @discord.option(name="insert", description="Add the song to the given position in queue", min_value=1, required=False)
+    @discord.option(name="instant", description="Replay the song instantly", required=False)
+    async def replay(self, ctx: discord.ApplicationContext, from_: int = 0, insert: int = 1, instant: bool = False):
+        queue = self.queue[ctx.guild.id]
 
-        if not ctx.voice_client:
+        if not (ctx.voice_client and len(queue.previous_songs)):
             embed = discord.Embed(
-                description="**Error:** Not connected to a voice channel.",
-                color=discord.Color.red()
+                description=f"**Error:** No previous songs associated with this queue.",
+                color=EmbedColor.RED
             )
-            await ctx.respond(embed=embed)
-            return
+            return await ctx.respond(embed=embed, ephemeral=True)
+        elif not ctx.user.voice or ctx.user.voice.channel != ctx.voice_client.channel:
+            embed = discord.Embed(
+                description=f"**Note:** Please connect to the voice channel first.",
+                color=EmbedColor.BLUE
+            )
+            return await ctx.respond(embed=embed, ephemeral=True)
+        
+        from_ = min(from_ - 1 or len(queue.previous_songs) - 1, len(queue.previous_songs) - 1)
+        replayed_song = queue.previous_songs.pop(from_)
+        setattr(replayed_song, "_replayed", True)
+        queue.songs.insert(insert, replayed_song)
 
-        self.loop[ctx.guild.id]["mode"] = mode
+        await self._update_play_message(ctx)
+        request_type = getattr(ctx, "_request_type", None)
+
+        if request_type:
+            current_song = copy.copy(queue.songs[0])
+            setattr(queue.songs[0], "_ignore_add", True)
+            queue.songs.insert(2, current_song)
 
         embed = discord.Embed(
-            description=f"**⟳ Loop mode is now:** {mode}",
-            color=discord.Color.blurple()
+            description=f"**⭟ Replaying song:** {replayed_song.title} [**{insert}**]",
+            color=EmbedColor.PURPLE
         )
-        if self.button_invoker[ctx.guild.id]:
-            embed.set_footer(text=f"Requested via a button [{self.button_invoker[ctx.guild.id]}]")
-
-            if self.messages[ctx.guild.id]["loop"]:
-                try:
-                    await self.messages[ctx.guild.id]["loop"].edit(embed=embed)
-                except discord.errors.NotFound:
-                    self.messages[ctx.guild.id]["loop"] = await ctx.send(embed=embed)
-            else:
-                self.messages[ctx.guild.id]["loop"] = await ctx.send(embed=embed)
+        if request_type:
+            embed.set_footer(text=f"Requested via a {request_type} [{ctx.user.name}]")
+            await ctx.send(embed=embed)
         else:
             await ctx.respond(embed=embed)
 
-        if mode == "Single":
-            self.gui[ctx.guild.id]["loop"].style = discord.ButtonStyle.primary
-        elif mode == "Queue":
-            self.gui[ctx.guild.id]["loop"].style = discord.ButtonStyle.success
+        if not (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()):
+            await self._play_song(ctx, queue.songs[0])
+        elif instant:
+            ctx.voice_client.stop()
+    
+    @commands.slash_command(description="Displays songs in queue, with the ability to seek them")
+    @discord.option(name="to", description="The end position of the queue display", min_value=1, required=False)
+    @discord.option(name="from_", description="The start position of the queue display", min_value=1, required=False)
+    @discord.option(name="seek", description="Seek songs via given keywords", required=False)
+    @discord.option(name="previous", description="Display the previous queue", required=False)
+    async def view(self, ctx: discord.ApplicationContext, to: int = 0, from_: int = 0, seek: str = "", previous: bool = False):
+        queue = self.queue[ctx.guild.id]
+        previous_offset = 1 if previous else 0
+        queue_songs = (queue.previous_songs if previous else queue.songs) if queue else []
+        queue_length = len(queue_songs) - (not previous_offset)
+
+        to = ((max(1, min(queue_length if (not to and (from_ or seek)) else (to or 10), queue_length)))) - previous_offset
+        from_ = (max(1, min(from_ or 1, queue_length))) - previous_offset
+        if from_ > to: from_, to = to, from_
+
+        displayed_song_count = to + 1 - from_
+        joined_queue, char_count, seek_excess = "", 0, 0
+        
+        for i, song in enumerate(queue_songs[from_:to + 1]):
+            if seek and song.title and seek.lower() not in song.title.lower():
+                seek_excess += 1
+                continue
+
+            queue_entry = f"[**{from_ + i + previous_offset}**] {song.title} [**{f'{format_duration(song.start_at, False)} -> ' if song.start_at and not hasattr(song, '_sought') else ''}{song.formatted_duration}**]"
+            
+            if char_count + len(queue_entry) > 3940:
+                displayed_song_count = i - (not previous_offset)
+                break
+
+            joined_queue += f"{queue_entry}\n"
+            char_count += len(queue_entry)
+
+        excess = queue_length - displayed_song_count + seek_excess
+        current_song = queue.songs[0] if len(queue) else None
+        total_duration = sum(song.duration - song.start_at for song in queue_songs[(not previous_offset):] if song.duration)
+        filter_intensity_msg = f"[{queue.filter['intensity']} %]" if queue and queue.filter["name"] != "Disabled" else ""
+
+        if current_song:
+            elapsed = format_duration(int((getattr(current_song, "_paused_at", None) or time.time()) - current_song.start_time) + current_song.start_at, False)
+            footer_msg = f"> Now playing: {current_song.title} [{elapsed} | {current_song.formatted_duration}]\n> Volume: {queue.volume * 100} % | Filter: {queue.filter['name']}{filter_intensity_msg} | Loop: {queue.loop} | Autoplay: {'Enabled' if queue.autoplay else 'Disabled'}"
         else:
-            self.gui[ctx.guild.id]["loop"].style = discord.ButtonStyle.secondary
+            footer_msg = f"> Volume: {queue.volume * 100} % | Filter: {queue.filter['name']}{filter_intensity_msg} | Loop: {queue.loop} | Autoplay: {'Enabled' if queue.autoplay else 'Disabled'}"
 
-        if self.messages[ctx.guild.id]["main"] and not self.button_invoker[ctx.guild.id]:
-            try:
-                await self.messages[ctx.guild.id]["main"].edit(view=self.resolve_view(ctx))
-            except (discord.NotFound, discord.HTTPException):
-                pass
-
-    @commands.slash_command(name="autoplay", description="Toggles autoplay for the queue")
-    async def autoplay_(self, ctx: discord.ApplicationContext):
-        await ctx.defer()
-
-        if not ctx.voice_client:
+        if not joined_queue:
             embed = discord.Embed(
-                description="**Error:** Not connected to a voice channel.",
-                color=discord.Color.red()
+                description=f"**\\👁 In{' previous' if previous else ''} queue** matching `{seek}` [**{from_ + previous_offset}-{to + previous_offset}**]:\nNo matches found." if seek else "Queue is empty.",
+                color=EmbedColor.YELLOW
             )
-            await ctx.respond(embed=embed)
-            return
-
-        self.autoplay[ctx.guild.id] = "Disabled" if self.autoplay[ctx.guild.id] == "Enabled" else "Enabled"
-
+            embed.set_footer(text=footer_msg)
+            return await ctx.respond(embed=embed)
+        
+        excess_msg = f"+ **{excess}** more...\n" if excess else ""
         embed = discord.Embed(
-            description=f"**⮓ Autoplay is now:** {self.autoplay[ctx.guild.id]}",
-            color=discord.Color.blurple()
+            description=f"**\\👁 In{' previous' if previous else ''} queue**{f' matching `{seek}`' if seek else ''} [**{from_ + previous_offset}-{to + previous_offset}**]:\n{joined_queue}{excess_msg}\n**In total: {queue_length}** song(s) [**{format_duration(total_duration, False)}**]",
+            color=EmbedColor.YELLOW
         )
+        embed.set_footer(text=footer_msg)
         await ctx.respond(embed=embed)
+    
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+        voice_channel = before.channel or after.channel
+        if not voice_channel: return
 
-        if not (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()) and self.previous[ctx.guild.id]:
-            related = await self.get_related_videos(ctx, self.previous[ctx.guild.id][-1].url, first=True)
-            await self.play(ctx, related[0][1])
+        voice_client = member.guild.voice_client
+        if not voice_client or voice_client.channel != voice_channel: return
 
+        assert self.bot.user
 
-    @connect.before_invoke
-    @play.before_invoke
-    async def ensure_dicts(self, ctx: discord.ApplicationContext):
-        if ctx.guild.id not in self.queue:
-            self.ctx[ctx.guild.id] = ctx
-            self.queue[ctx.guild.id] = []
-            self.previous[ctx.guild.id] = []
-            self.removed[ctx.guild.id] = []
-            self.volume[ctx.guild.id] = 0.5
-            self.booleans[ctx.guild.id] = {"first": False, "ignore_msg": False, "clear_elapsed": True, "backed": False}
-            self.filters[ctx.guild.id] = {"mode": "Disabled", "value": None, "intensity": 35}
-            self.elapsed_time[ctx.guild.id] = {"start": 0, "pause_start": 0, "pause": 0, "current": 0, "seek": 0}
-            self.loop[ctx.guild.id] = {"mode": "Disabled", "count": 0}
-            self.messages[ctx.guild.id] = {"main": None, "loop": None, "pause": None, "remove": None, "volume": None,
-                                           "skip": None, "replay": None}
-            self.button_invoker[ctx.guild.id] = None
-            self.autoplay[ctx.guild.id] = "Disabled"
-            self.speech_invoker[ctx.guild.id] = None
-            self.gui[ctx.guild.id] = {
-                "select": Select(placeholder="Suggested...", options=[], min_values=1, max_values=1, row=1),
-                "back": Button(style=discord.ButtonStyle.secondary, label="Back",
-                               emoji="<:goback:1142844613003067402>", row=3),
-                "pause": Button(style=discord.ButtonStyle.secondary, label="Pause",
-                                emoji="<:playpause:1086408066490183700>", row=3),
-                "skip": Button(style=discord.ButtonStyle.secondary, label="Skip",
-                               emoji="<:skip:1086405128787067001>", row=3),
-                "loop": Button(style=discord.ButtonStyle.secondary, emoji="<loopy:1196862829752500265>", row=3),
-                "remove": Button(style=discord.ButtonStyle.danger, emoji="<:remove:1197082264924852325>", row=3),
-                "volume_min": Button(style=discord.ButtonStyle.danger, emoji="<:volume_mute:1143513586967257190",
-                                     row=2),
-                "volume_down": Button(style=discord.ButtonStyle.danger, emoji="<:volume_down:1143513584505192520",
-                                      row=2),
-                "volume_mid": Button(style=discord.ButtonStyle.secondary, emoji="<:volume_mid:1143514064023212174",
-                                     row=2),
-                "volume_up": Button(style=discord.ButtonStyle.success, emoji="<:volume_up:1143513588623999087", row=2),
-                "volume_max": Button(style=discord.ButtonStyle.success, emoji="<:volume:1142886748200910959", row=2)
-            }
-            self.views[ctx.guild.id] = {
-                "all": View(timeout=None),
-                "no_remove": View(timeout=None),
-                "no_back": View(timeout=None),
-                "no_remove_and_back": View(timeout=None)
-            }
-            self.store_queue_count()
+        bot_connected = any(member.id == self.bot.user.id for member in voice_channel.members)
+        non_bot_members = [member for member in voice_channel.members if not member.bot]
+        queue = self.queue[member.guild.id]
+        if not queue: return
 
-            for elem in self.gui[ctx.guild.id].keys():
-                self.gui[ctx.guild.id][elem].callback = await self.resolve_gui_callback(ctx, elem)
+        if voice_client and before.self_mute and not after.self_mute:
+            settings = load_settings()
+            key = f"{member.id}-{member.guild.id}"
+            cctx = copy.copy(queue.ctx)
+            setattr(cctx, "_request_type", "voice command")
+            if settings.get(key, {}).get("speech_recognition"): await self._detect_speech(cctx)
 
-                for view in self.views[ctx.guild.id].keys():
-                    if (view in ("no_remove", "no_remove_and_back") and elem == "remove") or \
-                            (view in ("no_back", "no_remove_and_back") and elem == "back"):
-                        continue
-                    self.views[ctx.guild.id][view].add_item(self.gui[ctx.guild.id][elem])
+        if not bot_connected or len(non_bot_members) == 0:
+            text_channel = self.bot.get_channel(queue.text_channel)
+            await self._cleanup(queue.ctx)
+            await voice_client.disconnect()
 
+            if isinstance(text_channel, (discord.TextChannel, discord.Thread)):
+                if not bot_connected:
+                    embed = discord.Embed(
+                        description=f"**Disconnected from current voice channel:** {voice_channel}",
+                        color=EmbedColor.DARK_RED
+                    )
+                    return await text_channel.send(embed=embed)
+
+                embed = discord.Embed(
+                    description=f"**Everyone has left the voice channel:** {voice_channel}",
+                    color=EmbedColor.DARK_RED
+                )
+                embed.set_footer(text="Disconnecting, until next time.")
+                await text_channel.send(embed=embed)
 
 def setup(bot):
     bot.add_cog(Music(bot))
