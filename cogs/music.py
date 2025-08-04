@@ -30,6 +30,7 @@ class PlayMessageMenu(discord.ui.Select):
         command = cast(Callable[..., Awaitable[None]], getattr(self.music, str(self.custom_id), None))
         queue = self.music.queue[interaction.guild.id]
         cctx = copy.copy(queue.ctx)
+        cctx.user = interaction.user
         setattr(cctx, "_request_type", "suggestion")
 
         await command(cctx, self.values[0])
@@ -44,19 +45,22 @@ class PlayMessageButton(discord.ui.Button):
 
         assert interaction.guild
 
+        queue = self.music.queue.get(interaction.guild.id)
+        if not queue: return
+
         id_string = str(self.custom_id)
         command = cast(Callable[..., Awaitable[None]], getattr(self.music, id_string.split("_")[0], None))
-        queue = self.music.queue[interaction.guild.id]
         cctx = copy.copy(queue.ctx)
+        cctx.user = interaction.user
         setattr(cctx, "_request_type", "button")
 
         if callable(command):
             if "volume" in id_string:
                 volume_map = {
                     "volume_min": 0,
-                    "volume_down": int((queue.volume * 100) - 10),
+                    "volume_down": max(0, queue.volume - 10),
                     "volume_mid": 100,
-                    "volume_up": int((queue.volume * 100) + 10),
+                    "volume_up": min(200, queue.volume + 10),
                     "volume_max": 200
                 }
                 await command(cctx, volume_map[id_string])
@@ -331,7 +335,7 @@ class Music(commands.Cog):
             return await ctx.followup.send(embed=embed, ephemeral=True)
 
         song.player = source
-        song.player.volume = queue.volume
+        song.player.volume = round(queue.volume / 100, 1)
         if not ctx.voice_client: return
 
         ctx.voice_client.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(self._after_song(ctx, e), self.bot.loop))
@@ -922,8 +926,8 @@ class Music(commands.Cog):
             return await ctx.followup.send(embed=embed, ephemeral=True)
         
         queue = self.queue[ctx.guild.id]
-        queue.volume = max(0, min(200, round(level / 100, 2)))
-        if ctx.voice_client.is_playing() and queue.songs[0].player: queue.songs[0].player.volume = queue.volume
+        queue.volume = max(0, min(200, level))
+        if ctx.voice_client.is_playing() and queue.songs[0].player: queue.songs[0].player.volume = round(queue.volume / 100, 1)
         request_type = getattr(ctx, "_request_type", None)
 
         embed = discord.Embed(
@@ -1210,13 +1214,13 @@ class Music(commands.Cog):
         excess = queue_length - displayed_song_count + seek_excess
         current_song = queue.songs[0] if len(queue) else None
         total_duration = sum(song.duration - song.start_at for song in queue_songs[(not previous_offset):] if song.duration)
-        filter_intensity_msg = f"[{queue.filter['intensity']} %]" if queue and queue.filter["name"] != "Disabled" else ""
+        filter_intensity_msg = f" [{queue.filter['intensity']} %]" if queue and queue.filter["name"] != "Disabled" else ""
 
         if current_song:
             elapsed = format_duration(int((getattr(current_song, "_paused_at", None) or time.time()) - current_song.start_time) + current_song.start_at, False)
-            footer_msg = f"> Now playing: {current_song.title} [{elapsed} | {current_song.formatted_duration}]\n> Volume: {queue.volume * 100} % | Filter: {queue.filter['name']}{filter_intensity_msg} | Loop: {queue.loop} | Autoplay: {'Enabled' if queue.autoplay else 'Disabled'}"
+            footer_msg = f"> Now playing: {current_song.title} [{elapsed} | {current_song.formatted_duration}]\n> Volume: {queue.volume} % | Filter: {queue.filter['name']}{filter_intensity_msg} | Loop: {queue.loop} | Autoplay: {'Enabled' if queue.autoplay else 'Disabled'}"
         else:
-            footer_msg = f"> Volume: {queue.volume * 100} % | Filter: {queue.filter['name']}{filter_intensity_msg} | Loop: {queue.loop} | Autoplay: {'Enabled' if queue.autoplay else 'Disabled'}"
+            footer_msg = f"> Volume: {queue.volume} % | Filter: {queue.filter['name']}{filter_intensity_msg} | Loop: {queue.loop} | Autoplay: {'Enabled' if queue.autoplay else 'Disabled'}"
 
         if not joined_queue:
             embed = discord.Embed(
@@ -1242,11 +1246,7 @@ class Music(commands.Cog):
         voice_client = member.guild.voice_client
         if not voice_client or voice_client.channel != voice_channel: return
 
-        assert self.bot.user
-
-        bot_connected = any(member.id == self.bot.user.id for member in voice_channel.members)
-        non_bot_members = [member for member in voice_channel.members if not member.bot]
-        queue = self.queue[member.guild.id]
+        queue = self.queue.get(member.guild.id)
         if not queue: return
 
         if voice_client and before.self_mute and not after.self_mute:
@@ -1255,6 +1255,11 @@ class Music(commands.Cog):
             cctx = copy.copy(queue.ctx)
             setattr(cctx, "_request_type", "voice command")
             if settings.get(key, {}).get("speech_recognition"): await self._detect_speech(cctx)
+
+        assert self.bot.user
+
+        bot_connected = any(member.id == self.bot.user.id for member in voice_channel.members)
+        non_bot_members = [member for member in voice_channel.members if not member.bot]
 
         if not bot_connected or len(non_bot_members) == 0:
             text_channel = self.bot.get_channel(queue.text_channel)

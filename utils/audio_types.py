@@ -60,7 +60,7 @@ class Queue:
         self.songs: list[PlayerEntry] = []
         self.previous_songs: list[PlayerEntry] = []
         self.text_channel: int = 0
-        self.volume: float = 1.0
+        self.volume: int = 100
         self.autoplay: bool = False
         self.ctx: discord.ApplicationContext = cast(discord.ApplicationContext, None)
         self.loop: str = "Disabled"

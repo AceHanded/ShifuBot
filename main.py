@@ -1,4 +1,5 @@
 import json
+import asyncio
 import discord
 import discord.utils
 from datetime import datetime
@@ -146,4 +147,7 @@ async def on_ready():
     print(f"{bot.user} ({bot.user.id}) initialized!\n-----")
 
 if __name__ == "__main__":
-    bot.run(config["TOKEN"])
+    try:
+        bot.run(config["TOKEN"])
+    finally:
+        asyncio.run(close_aiohttp_session())

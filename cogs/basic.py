@@ -203,7 +203,7 @@ class Basic(commands.Cog):
         ram_total, ram_usage, ram_percent, cpu, guilds = get_performance_metrics(self.bot)
 
         embed = discord.Embed(
-            description=f"Currently connected to **{len(guilds)}** guild(s).\n**RAM:** {ram_usage} ({ram_percent}) / {ram_total} GiB (100.0 %)\n**CPU:** {cpu} / 100.0 %",
+            description=f"Currently connected to **{len(guilds)}** of **{len(self.bot.guilds)}** guild(s).\n**RAM:** {ram_usage} ({ram_percent}) / {ram_total} GiB (100.0 %)\n**CPU:** {cpu} / 100.0 %",
             color=EmbedColor.YELLOW
         )
         await ctx.respond(embed=embed, ephemeral=True)

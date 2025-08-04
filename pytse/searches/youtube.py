@@ -24,7 +24,7 @@ async def resolve_avatar_and_related(url: str):
     initial_data = json.loads(json_str)
     two_column_results = initial_data["contents"]["twoColumnWatchNextResults"]
 
-    related, compact_video_renderers = [], []
+    related, lockup_view_models = [], []
     secondary_info_renderers = [item for item in two_column_results["results"]["results"]["contents"] if "videoSecondaryInfoRenderer" in item]
     owner_renderer = secondary_info_renderers[0]["videoSecondaryInfoRenderer"]["owner"]["videoOwnerRenderer"]
     uploader_avatar = owner_renderer["thumbnail"]["thumbnails"][-1]["url"]
@@ -32,17 +32,17 @@ async def resolve_avatar_and_related(url: str):
 
     try:
         related_video_renderer = secondary_results[1]["itemSectionRenderer"]["contents"] if secondary_results[1].get("itemSectionRenderer") else secondary_results
-        compact_video_renderers = [item["compactVideoRenderer"] for item in related_video_renderer if "compactVideoRenderer" in item]
+        lockup_view_models = [item["lockupViewModel"] for item in related_video_renderer if "lockupViewModel" in item]
     except KeyError as e:
         print(e)
 
-    for r in compact_video_renderers:
-        video_id = r["videoId"]
+    for v in lockup_view_models:
+        video_id = v["contentId"]
 
         if re.match(r"^[\w-]{11}$", video_id):
             related.append({
                 "url": f"https://www.youtube.com/watch?v={video_id}",
-                "title": r["title"]["simpleText"]
+                "title": v["metadata"]["lockupMetadataViewModel"]["title"]["content"]
             })
     
     return uploader_avatar, related
