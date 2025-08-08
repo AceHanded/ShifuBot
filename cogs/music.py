@@ -501,7 +501,22 @@ class Music(commands.Cog):
     @discord.option(name="start", description="Set the song to start from the given timestamp", required=False)
     async def play(self, ctx: discord.ApplicationContext, query: str, insert: int = 0, pre_shuffle: bool = False, start: str = "0"):
         if not ctx.interaction.response.is_done(): await ctx.defer()
+        
+        settings = load_settings()
+        key = f"{ctx.user.id}-{ctx.guild.id}"
+        keyword_source = settings.get(key, {}).get("default_search") or "youtube"
 
+        try:
+            result = await pytse.search(query, keyword_source=keyword_source)
+            if result.get("_error"): raise Exception("Search failed")
+        except Exception as e:
+            print(f"{type(e).__name__} occurred in play: {e}")
+            embed = discord.Embed(
+                description=f"**Error:** Failed to add query.",
+                color=EmbedColor.RED
+            )
+            return await ctx.followup.send(embed=embed, ephemeral=True)
+        
         if not ctx.voice_client:
             success = await self._connect_handling(ctx)
             if not success: return
@@ -511,78 +526,62 @@ class Music(commands.Cog):
                 color=EmbedColor.BLUE
             )
             return await ctx.followup.send(embed=embed, ephemeral=True)
+
+        queue = self.queue[ctx.guild.id]
+        insert = min(insert or len(queue), len(queue))
+        source = pytse.validate_url(query) or keyword_source
+        emoji = getattr(Emoji, str(source).upper(), None) or ":grey_question:"
+
+        if result.get("tracks"):
+            added_songs = [PlayerEntry({
+                **track,
+                "start_time": 0,
+                "start_at": 0,
+                "formatted_duration": format_duration(track["duration"]),
+                "requested_by": ctx.user.name
+            }) for track in result["tracks"]]
+
+            if (pre_shuffle): random.shuffle(added_songs)
+
+            queue.songs[insert:insert] = added_songs
+
+            embed = discord.Embed(
+                description=f"{emoji} Added **{len(added_songs)}** song(s) to queue{' **pre-shuffled**' if pre_shuffle else ''} from the playlist: [{result['title']}]({query}) [**{format_duration(result['duration'], False)}**]",
+                color=EmbedColor.GREEN
+            )
+            await ctx.followup.send(embed=embed)
         
-        settings = load_settings()
-        key = f"{ctx.user.id}-{ctx.guild.id}"
-        keyword_source = settings.get(key, {}).get("default_search") or "youtube"
+            if len(queue) == len(added_songs): return await self._play_song(ctx, queue.songs[0])
 
-        try:
-            result = await pytse.search(query, keyword_source=keyword_source)
-            if result.get("_error"): raise Exception("Search failed")
+            await self._update_play_message(ctx)
+        else:
+            song = PlayerEntry({
+                **result,
+                "start_time": 0,
+                "start_at": parse_duration(start, result["duration"]),
+                "formatted_duration": format_duration(result["duration"]),
+                "requested_by": ctx.user.name
+            })
+            if not song.title: song.title = "[ Unknown title ]"
+        
+            queue.songs.insert(insert, song)
 
-            queue = self.queue[ctx.guild.id]
-            insert = min(insert or len(queue), len(queue))
-            source = pytse.validate_url(query) or keyword_source
-            emoji = getattr(Emoji, str(source).upper(), None) or ":grey_question:"
-
-            if result.get("tracks"):
-                added_songs = [PlayerEntry({
-                    **track,
-                    "start_time": 0,
-                    "start_at": 0,
-                    "formatted_duration": format_duration(track["duration"]),
-                    "requested_by": ctx.user.name
-                }) for track in result["tracks"]]
-
-                if (pre_shuffle): random.shuffle(added_songs)
-
-                queue.songs[insert:insert] = added_songs
+            if len(queue) == 1:
+                setattr(queue.songs[0], "_first", True)
+                await self._play_song(ctx, queue.songs[0])
+            else:
+                request_type = getattr(ctx, "_request_type", None)
 
                 embed = discord.Embed(
-                    description=f"{emoji} Added **{len(added_songs)}** song(s) to queue{' **pre-shuffled**' if pre_shuffle else ''} from the playlist: [{result['title']}]({query}) [**{format_duration(result['duration'], False)}**]",
+                    description=f"**{emoji} Added to queue:** [{song.title}]({song.url}) [**{f'{format_duration(song.start_at, False)} -> ' if song.start_at and not hasattr(song, '_sought') else ''}{song.formatted_duration}**] [**{insert}**]",
                     color=EmbedColor.GREEN
                 )
-                await ctx.followup.send(embed=embed)
-            
-                if len(queue) == len(added_songs):
-                    return await self._play_song(ctx, queue.songs[0])
-
-                await self._update_play_message(ctx)
-            else:
-                song = PlayerEntry({
-                    **result,
-                    "start_time": 0,
-                    "start_at": parse_duration(start, result["duration"]),
-                    "formatted_duration": format_duration(result["duration"]),
-                    "requested_by": ctx.user.name
-                })
-                if not song.title: song.title = "[ Unknown title ]"
-            
-                queue.songs.insert(insert, song)
-
-                if len(queue) == 1:
-                    setattr(queue.songs[0], "_first", True)
-                    await self._play_song(ctx, queue.songs[0])
+                if request_type:
+                    embed.set_footer(text=f"Requested via a {request_type} [{ctx.user.name}]")
+                    await ctx.send(embed=embed)
                 else:
-                    request_type = getattr(ctx, "_request_type", None)
-
-                    embed = discord.Embed(
-                        description=f"**{emoji} Added to queue:** [{song.title}]({song.url}) [**{f'{format_duration(song.start_at, False)} -> ' if song.start_at and not hasattr(song, '_sought') else ''}{song.formatted_duration}**] [**{insert}**]",
-                        color=EmbedColor.GREEN
-                    )
-                    if request_type:
-                        embed.set_footer(text=f"Requested via a {request_type} [{ctx.user.name}]")
-                        await ctx.send(embed=embed)
-                    else:
-                        await ctx.followup.send(embed=embed)
-                    await self._update_play_message(ctx)
-        except Exception as e:
-            print(f"{type(e).__name__} occurred in play: {e}")
-            embed = discord.Embed(
-                description=f"**Error:** Failed to add query.",
-                color=EmbedColor.RED
-            )
-            await ctx.followup.send(embed=embed, ephemeral=True)
+                    await ctx.followup.send(embed=embed)
+                await self._update_play_message(ctx)
     
     @commands.slash_command(description="Plays audio from a given file")
     @discord.option(name="file", description="File to play audio from", required=True)

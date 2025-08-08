@@ -11,6 +11,7 @@ class EmbedColor(IntEnum):
 class Emoji(StrEnum):
     DEFAULT = ":grey_question:"
     FILE = "<:file:1366159986597691392>"
+    BANDCAMP = "<:bandcamp:1403153520273653972>"
     SOUNDCLOUD = "<:soundcloud:1267269257423618060>"
     SPOTIFY = "<:spotify:1267269271390519376>"
     YOUTUBE_MUSIC = "<:youtube_music:1366160008059944960>"

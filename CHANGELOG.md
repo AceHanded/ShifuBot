@@ -2,6 +2,15 @@
 
 ---
 
+<details id="v1.1.2">
+    <summary>v1.1.2</summary>
+    
+    - Fixed video ID resolving in the YouTube search submodule.
+
+    - Added a built-in search submodule for Bandcamp.
+
+    - Added a new option `Bandcamp` for the `default_search` parameter of the `settings` command.
+</details>
 <details id="v1.1.1">
     <summary>v1.1.1</summary>
     

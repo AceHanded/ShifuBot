@@ -9,10 +9,11 @@ async def _resolve_video_url(query: str):
     if not json_str: raise Exception("Failed to parse ytInitialData")
 
     data = json.loads(json_str)
-    item_section_renderers = [item for item in data["contents"]["twoColumnSearchResultsRenderer"]["primaryContents"]["sectionListRenderer"]["contents"] if "itemSectionRenderer" in item]
-    desired_item_section_renderer = item_section_renderers[1] if len(item_section_renderers) > 1 else item_section_renderers[0]
-    first_video = next((item for item in desired_item_section_renderer["itemSectionRenderer"]["contents"] if "videoRenderer" in item), {})
-    video_id = first_video["videoRenderer"]["videoId"]
+    item_section_renderers = [item for item in data["contents"]["twoColumnSearchResultsRenderer"]["primaryContents"]["sectionListRenderer"]["contents"] if item.get("itemSectionRenderer", {}).get("contents", [{}])[0].get("videoRenderer")]
+    if not item_section_renderers: raise Exception("Failed to resolve URL")
+
+    first_video = item_section_renderers[0]["itemSectionRenderer"]["contents"][0]["videoRenderer"]
+    video_id = first_video["videoId"]
     
     return f"https://www.youtube.com/watch?v={video_id}"
 

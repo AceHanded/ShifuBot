@@ -15,7 +15,13 @@ access_token = {"token": None, "expiry": 0}
 session = None
 
 def _get_headers(source: str) -> dict[str, str]:
-    if source == "soundcloud":
+    if source == "bandcamp":
+        return {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) Gecko/20100101 Firefox/138.0",
+            "Accept-Language": "fi-FI,fi;q=0.8,en-US;q=0.5,en;q=0.3",
+            "Referer": "https://bandcamp.com/"
+        }
+    elif source == "soundcloud":
         return {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) Gecko/20100101 Firefox/138.0",
             "Accept-Language": "fi-FI,fi;q=0.8,en-US;q=0.5,en;q=0.3",

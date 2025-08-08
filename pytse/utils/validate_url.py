@@ -3,13 +3,15 @@ from enum import StrEnum
 
 class Patterns(StrEnum):
     DEFAULT = r"^(?:https?:\/\/)?(?:[\w-]+\.)+[a-zA-Z]{2,}(?:\/[^\s]*)?$"
+    BANDCAMP = r"^(?:https?:\/\/)?[\w-]+\.bandcamp\.com\/(?:track|album)\/[\w-]+$"
     SOUNDCLOUD = r"^(?:https?:\/\/)?soundcloud\.com\/[\w-]+\/(?:sets\/)?[\w-]+$"
     SPOTIFY = r"^(?:https?:\/\/)?open\.spotify\.com\/(?:track|album|playlist)\/.+$"
     YOUTUBE_MUSIC = r"^(?:https?:\/\/)?music\.youtube\.com\/(?:watch\?v=[\w-]{11}|playlist\?list=.+)$"
     YOUTUBE = r"^(?:https?:\/\/)?(?:(?:www|m)\.)?youtu(?:\.be|be\.com)\/(?:watch\?v=[\w-]{11}(?:&list=.+)?|playlist\?list=.+).*$"
 
 def validate_url(url: str) -> bool | str:
-    if re.match(Patterns.SOUNDCLOUD, url): return "soundcloud"
+    if re.match(Patterns.BANDCAMP, url): return "bandcamp"
+    elif re.match(Patterns.SOUNDCLOUD, url): return "soundcloud"
     elif re.match(Patterns.SPOTIFY, url): return "spotify"
     elif re.match(Patterns.YOUTUBE_MUSIC, url): return "youtube_music"
     elif re.match(Patterns.YOUTUBE, url): return "youtube"

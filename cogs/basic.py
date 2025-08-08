@@ -173,11 +173,12 @@ class Basic(commands.Cog):
 
     @commands.slash_command(description="Modifies user-specific settings")
     @discord.option(name="speech_recognition", description="Toggle the ability to recognize speech for the user", required=False)
-    @discord.option(name="default_search", description="Set the default source to use when searching for songs", choices=["SoundCloud", "Spotify", "YouTube Music", "YouTube"], required=False)
+    @discord.option(name="default_search", description="Set the default source to use when searching for songs", choices=["Bandcamp", "SoundCloud", "Spotify", "YouTube Music", "YouTube"], required=False)
     async def settings(self, ctx: discord.ApplicationContext, speech_recognition: bool = None, default_search: str = ""):
         key = f"{ctx.author.id}-{ctx.guild.id}"
         data = load_settings()
         search_names = {
+            "bandcamp": "Bandcamp",
             "soundcloud": "SoundCloud",
             "spotify": "Spotify",
             "youtube_music": "YouTube Music",
